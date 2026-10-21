@@ -1,0 +1,15 @@
+/home/almoha/Applications/octo-calc/build/classes/energy/octo/calc/R$color.class
+/home/almoha/Applications/octo-calc/build/classes/energy/octo/calc/CalculatorView.class
+/home/almoha/Applications/octo-calc/build/classes/energy/octo/calc/CalcEngine.class
+/home/almoha/Applications/octo-calc/build/classes/energy/octo/calc/R$string.class
+/home/almoha/Applications/octo-calc/build/classes/energy/octo/calc/CalcEngine$Val.class
+/home/almoha/Applications/octo-calc/build/classes/energy/octo/calc/HistoryStore$Entry.class
+/home/almoha/Applications/octo-calc/build/classes/energy/octo/calc/CalcEngine$Error.class
+/home/almoha/Applications/octo-calc/build/classes/energy/octo/calc/R$font.class
+/home/almoha/Applications/octo-calc/build/classes/energy/octo/calc/R$style.class
+/home/almoha/Applications/octo-calc/build/classes/energy/octo/calc/R$mipmap.class
+/home/almoha/Applications/octo-calc/build/classes/energy/octo/calc/R.class
+/home/almoha/Applications/octo-calc/build/classes/energy/octo/calc/CalculatorView$Btn.class
+/home/almoha/Applications/octo-calc/build/classes/energy/octo/calc/R$drawable.class
+/home/almoha/Applications/octo-calc/build/classes/energy/octo/calc/MainActivity.class
+/home/almoha/Applications/octo-calc/build/classes/energy/octo/calc/HistoryStore.class
