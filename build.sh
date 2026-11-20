@@ -2,19 +2,33 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
-SDK="$HOME/Android/Sdk"
-BT="$SDK/build-tools/36.0.0"
-PLATFORM="$SDK/platforms/android-36/android.jar"
-JDK="$HOME/Android/jdk21"
+SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-$HOME/Android/Sdk}}"
+BT="${ANDROID_BUILD_TOOLS:-$SDK/build-tools/36.0.0}"
+PLATFORM="${ANDROID_PLATFORM:-$SDK/platforms/android-36/android.jar}"
+JDK="${JAVA_HOME:-$HOME/Android/jdk21}"
+if [ -x "$JDK/bin/javac" ]; then
+  JAVAC="$JDK/bin/javac"
+  JAVA="$JDK/bin/java"
+  KEYTOOL="$JDK/bin/keytool"
+  export JAVA_HOME="$JDK"
+  export PATH="$JAVA_HOME/bin:$PATH"
+else
+  JAVAC="$(command -v javac)"
+  JAVA="$(command -v java)"
+  KEYTOOL="$(command -v keytool)"
+fi
 OUT="$ROOT/build"
-export JAVA_HOME="$HOME/Android/jdk21"
-export PATH="$JAVA_HOME/bin:$PATH"
-PKG="energy.octo.calc"
 VERSION_NAME="1.0"
 VERSION_CODE="1"
 
 rm -rf "$OUT"
-mkdir -p "$OUT/gen" "$OUT/classes" "$OUT/dex"
+mkdir -p "$OUT/gen" "$OUT/classes" "$OUT/dex" "$OUT/test-classes"
+
+"$JAVAC" -encoding UTF-8 -source 17 -target 17 -Xlint:-options \
+  -d "$OUT/test-classes" \
+  "$ROOT/java/energy/octo/calc/CalcEngine.java" \
+  "$ROOT/test/energy/octo/calc/CalcEngineTest.java"
+"$JAVA" -cp "$OUT/test-classes" energy.octo.calc.CalcEngineTest
 
 "$BT/aapt2" compile --dir "$ROOT/res" -o "$OUT/res.zip"
 
@@ -31,7 +45,7 @@ mkdir -p "$OUT/gen" "$OUT/classes" "$OUT/dex"
   -o "$OUT/unsigned.apk"
 
 find "$ROOT/java" "$OUT/gen" -name '*.java' > "$OUT/sources.txt"
-"$JDK/bin/javac" -encoding UTF-8 -source 17 -target 17 -Xlint:-options \
+"$JAVAC" -encoding UTF-8 -source 17 -target 17 -Xlint:-options \
   -classpath "$PLATFORM" \
   -d "$OUT/classes" @"$OUT/sources.txt"
 
@@ -43,16 +57,19 @@ cp "$OUT/unsigned.apk" "$OUT/app.apk"
 
 "$BT/zipalign" -f -p 4 "$OUT/app.apk" "$OUT/app-aligned.apk"
 
-KS="$HOME/.android/octocalc.keystore"
+KS="${OCTOCALC_KEYSTORE:-$HOME/.android/octocalc.keystore}"
+KS_PASS="${OCTOCALC_KS_PASS:-octocalc}"
+KEY_PASS="${OCTOCALC_KEY_PASS:-octocalc}"
+KEY_ALIAS="${OCTOCALC_KEY_ALIAS:-octocalc}"
 if [ ! -f "$KS" ]; then
-  mkdir -p "$HOME/.android"
-  "$JDK/bin/keytool" -genkeypair -v -keystore "$KS" -storepass octocalc -keypass octocalc \
-    -alias octocalc -keyalg RSA -keysize 2048 -validity 10000 \
+  mkdir -p "$(dirname "$KS")"
+  "$KEYTOOL" -genkeypair -v -keystore "$KS" -storepass "$KS_PASS" -keypass "$KEY_PASS" \
+    -alias "$KEY_ALIAS" -keyalg RSA -keysize 2048 -validity 10000 \
     -dname "CN=Octo Calc, OU=Personal, O=OctoCalc, L=Paris, C=FR" >/dev/null 2>&1
 fi
 
-"$BT/apksigner" sign --ks "$KS" --ks-pass pass:octocalc --key-pass pass:octocalc \
-  --out "$ROOT/OctoCalc.apk" "$OUT/app-aligned.apk"
+"$BT/apksigner" sign --ks "$KS" --ks-pass "pass:$KS_PASS" --key-pass "pass:$KEY_PASS" \
+  --ks-key-alias "$KEY_ALIAS" --out "$ROOT/OctoCalc.apk" "$OUT/app-aligned.apk"
 
 "$BT/apksigner" verify "$ROOT/OctoCalc.apk"
 echo "APK: $ROOT/OctoCalc.apk"

@@ -1,6 +1,8 @@
 package energy.octo.calc;
 
 import android.animation.ValueAnimator;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -11,6 +13,7 @@ import android.graphics.LinearGradient;
 import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.RadialGradient;
+import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Shader;
 import android.graphics.Typeface;
@@ -18,19 +21,33 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.DisplayMetrics;
+import android.util.TypedValue;
 import android.view.HapticFeedbackConstants;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
+import android.view.VelocityTracker;
 import android.view.View;
+import android.view.ViewParent;
 import android.view.WindowInsets;
+import android.view.accessibility.AccessibilityEvent;
+import android.view.accessibility.AccessibilityManager;
+import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityNodeProvider;
 import android.view.animation.DecelerateInterpolator;
+import android.widget.OverScroller;
+import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.List;
 
 final class CalculatorView extends View {
 
+    interface OnOverlayChangedListener {
+        void onOverlayChanged(boolean open);
+    }
+
     private static final int INK = 0xFF100030;
-    private static final int INK_DEEP = 0xFF0B0022;
     private static final int SURFACE = 0xFF211052;
     private static final int SURFACE_PRESSED = 0xFF2C1968;
     private static final int ACTION = 0xFF2B1A5F;
@@ -42,8 +59,6 @@ final class CalculatorView extends View {
     private static final int MUTED = 0xFFA49FC8;
     private static final int MUTED_DARK = 0xFF7C74A8;
     private static final int WHITE = 0xFFFFFFFF;
-    private static final int CYAN = 0xFF71E3FF;
-    private static final int YELLOW = 0xFFFFD862;
 
     private static final int ID_AC = 1;
     private static final int ID_PAREN = 2;
@@ -83,6 +98,36 @@ final class CalculatorView extends View {
     private static final int OVERLAY_CONFIRM = 3;
     private static final int OVERLAY_ABOUT = 4;
 
+    private static final int TARGET_NONE = 0;
+    private static final int TARGET_HIST_CLOSE = 1;
+    private static final int TARGET_HIST_CLEAR = 2;
+    private static final int TARGET_HIST_LIST = 3;
+    private static final int TARGET_HIST_OUTSIDE = 4;
+    private static final int TARGET_MENU_CLEAR = 10;
+    private static final int TARGET_MENU_SCI = 11;
+    private static final int TARGET_MENU_ABOUT = 12;
+    private static final int TARGET_MENU_OUTSIDE = 13;
+    private static final int TARGET_CONFIRM_OK = 20;
+    private static final int TARGET_CONFIRM_CANCEL = 21;
+    private static final int TARGET_CONFIRM_OUTSIDE = 22;
+    private static final int TARGET_ABOUT_CLOSE = 30;
+    private static final int TARGET_ABOUT_OUTSIDE = 31;
+
+    private static final int V_DISPLAY = 1;
+    private static final int V_HIST_ICON = 2;
+    private static final int V_FX_ICON = 3;
+    private static final int V_MENU_ICON = 4;
+    private static final int V_BTN_BASE = 1000;
+    private static final int V_HIST_CLEAR = 2001;
+    private static final int V_HIST_CLOSE = 2002;
+    private static final int V_MENU_CLEAR = 2010;
+    private static final int V_MENU_SCI = 2011;
+    private static final int V_MENU_ABOUT = 2012;
+    private static final int V_CONFIRM_CANCEL = 2020;
+    private static final int V_CONFIRM_OK = 2021;
+    private static final int V_ABOUT_CLOSE = 2030;
+    private static final int V_HIST_ITEM_BASE = 3000;
+
     private static final class Btn {
         final int id;
         final boolean circle;
@@ -98,6 +143,8 @@ final class CalculatorView extends View {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final HistoryStore history;
     private final List<Btn> buttons = new ArrayList<>();
+    private final OverScroller historyScroller;
+    private final AccessibilityManager accessibilityManager;
 
     private final Paint bgPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint glowPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -108,10 +155,17 @@ final class CalculatorView extends View {
     private final Paint linePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint cardPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
 
+    private RadialGradient glowTopShader;
+    private RadialGradient glowBottomShader;
+    private LinearGradient eqShader;
+    private final RectF tmpRect = new RectF();
+    private final RectF tmpShadowRect = new RectF();
+    private final Path tmpPath = new Path();
+    private final int[] screenLoc = new int[2];
+
     private final Typeface regular;
     private final Typeface medium;
     private final Typeface semibold;
-    private final Typeface bold;
     private final Bitmap mascot;
     private final RectF mascotRect = new RectF();
 
@@ -122,17 +176,20 @@ final class CalculatorView extends View {
     private double lastAnswer;
     private boolean hasAnswer;
     private String errorMsg;
+    private String cachedPreview;
 
-    private boolean degrees = true;
+    private boolean degrees;
     private boolean inverse;
     private boolean scientific;
     private double memory;
     private boolean hasMemory;
+    private boolean recalledFromHistory;
 
-    private float density;
-    private float scaledDensity;
+    private final DisplayMetrics displayMetrics;
+    private final float density;
     private int W, H;
     private float padTop, padBottom;
+    private float contentLeft, contentW;
 
     private float headerTop, headerH;
     private float displayTop, displayBottom;
@@ -150,10 +207,10 @@ final class CalculatorView extends View {
     private final RectF rDisplay = new RectF();
 
     private int pressedId = -1;
-    private float downX, downY;
     private boolean longFired;
     private int headerPressed;
     private boolean displayDragging;
+    private boolean displayMoved;
     private float displayDragStartX;
     private float displayDragStartScroll;
     private final Runnable longPressRunnable = this::onLongPress;
@@ -161,6 +218,9 @@ final class CalculatorView extends View {
     private int overlay = OVERLAY_NONE;
     private float overlayAnim = 1f;
     private ValueAnimator overlayAnimator;
+    private int overlayDownTarget = TARGET_NONE;
+    private boolean confirmResetAll;
+    private OnOverlayChangedListener overlayChangedListener;
 
     private final RectF historySheet = new RectF();
     private final RectF historyList = new RectF();
@@ -172,6 +232,7 @@ final class CalculatorView extends View {
     private float historyDownY;
     private float historyStartScroll;
     private boolean historyMoved;
+    private VelocityTracker velocityTracker;
 
     private final RectF menuCard = new RectF();
     private final RectF menuClear = new RectF();
@@ -184,18 +245,30 @@ final class CalculatorView extends View {
     private final RectF aboutCard = new RectF();
     private final RectF aboutClose = new RectF();
 
+    private CalcAccessibilityProvider a11yProvider;
+    private int focusedVirtualId = View.NO_ID;
+    private int hoveredVirtualId = View.NO_ID;
+
     CalculatorView(Context context) {
         super(context);
-        density = getResources().getDisplayMetrics().density;
-        scaledDensity = getResources().getDisplayMetrics().scaledDensity;
+        displayMetrics = getResources().getDisplayMetrics();
+        density = displayMetrics.density;
         regular = getResources().getFont(R.font.poppins_regular);
         medium = getResources().getFont(R.font.poppins_medium);
         semibold = getResources().getFont(R.font.poppins_semibold);
-        bold = getResources().getFont(R.font.poppins_bold);
         mascot = BitmapFactory.decodeResource(getResources(), R.drawable.mascot);
         history = new HistoryStore(context);
+        historyScroller = new OverScroller(context);
+        accessibilityManager = (AccessibilityManager) context.getSystemService(Context.ACCESSIBILITY_SERVICE);
+
+        degrees = history.isDegrees();
+        scientific = history.isScientific();
+        hasMemory = history.hasMemory();
+        memory = hasMemory ? history.getMemory() : 0;
+
         setFocusable(true);
         setFocusableInTouchMode(true);
+        setImportantForAccessibility(IMPORTANT_FOR_ACCESSIBILITY_YES);
         setBackgroundColor(INK);
         setSystemUiVisibility(
                 SYSTEM_UI_FLAG_LAYOUT_STABLE
@@ -203,12 +276,24 @@ final class CalculatorView extends View {
                         | SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION);
     }
 
+    void setOnOverlayChangedListener(OnOverlayChangedListener listener) {
+        this.overlayChangedListener = listener;
+        if (listener != null) {
+            listener.onOverlayChanged(overlay != OVERLAY_NONE);
+        }
+    }
+
     private float dp(float value) {
         return value * density;
     }
 
     private float sp(float value) {
-        return value * scaledDensity;
+        float px = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, value, displayMetrics);
+        return Math.min(px, dp(value * 1.35f));
+    }
+
+    private String str(int resId) {
+        return getContext().getString(resId);
     }
 
     @Override
@@ -233,6 +318,10 @@ final class CalculatorView extends View {
         H = h;
         bgPaint.setShader(new LinearGradient(0, 0, W * 0.55f, H,
                 new int[]{0xFF170741, 0xFF100030, 0xFF0A0020}, null, Shader.TileMode.CLAMP));
+        glowTopShader = new RadialGradient(W * 0.92f, H * 0.30f, Math.max(1f, W * 0.62f),
+                new int[]{0x2AFF48D8, 0x0DFF48D8, 0x00FF48D8}, null, Shader.TileMode.CLAMP);
+        glowBottomShader = new RadialGradient(W * 0.02f, H * 0.72f, Math.max(1f, W * 0.55f),
+                new int[]{0x244B2AD8, 0x004B2AD8}, null, Shader.TileMode.CLAMP);
         layoutUi();
         requestFocus();
     }
@@ -241,9 +330,12 @@ final class CalculatorView extends View {
         if (W == 0 || H == 0) {
             return;
         }
+        contentW = Math.min(W, dp(540));
+        contentLeft = (W - contentW) / 2f;
+
         float margin = dp(16);
         keypadGap = dp(9);
-        keypadCellW = (W - 2 * margin - 3 * keypadGap) / 4f;
+        keypadCellW = (contentW - 2 * margin - 3 * keypadGap) / 4f;
         keypadCell = Math.min(keypadCellW * 1.1f, dp(96));
         headerTop = padTop + dp(6);
         headerH = dp(52);
@@ -261,17 +353,50 @@ final class CalculatorView extends View {
             available = contentBottom - (headerTop + headerH) - sciHeight - keypadH - dp(14);
         }
 
+        // Progressive compression for compact split-screen or landscape viewports.
+        while (available < dp(88)) {
+            boolean shrunk = false;
+            if (keypadCell > dp(38)) {
+                keypadCell = Math.max(dp(38), keypadCell - dp(1));
+                shrunk = true;
+            }
+            if (scientific && sciBtnH > dp(28)) {
+                sciBtnH = Math.max(dp(28), sciBtnH - dp(0.75f));
+                shrunk = true;
+            }
+            if (keypadGap > dp(5)) {
+                keypadGap = Math.max(dp(5), keypadGap - dp(0.5f));
+                shrunk = true;
+            }
+            if (sciGap > dp(4)) {
+                sciGap = Math.max(dp(4), sciGap - dp(0.25f));
+                shrunk = true;
+            }
+            if (headerH > dp(40)) {
+                headerH = Math.max(dp(40), headerH - dp(0.5f));
+                shrunk = true;
+            }
+            if (!shrunk) {
+                break;
+            }
+            keypadCellW = (contentW - 2 * margin - 3 * keypadGap) / 4f;
+            keypadCell = Math.min(keypadCell, keypadCellW * 1.1f);
+            keypadH = 5 * keypadCell + 4 * keypadGap;
+            sciHeight = scientific ? 4 * sciBtnH + 3 * sciGap + dp(8) : 0;
+            available = contentBottom - (headerTop + headerH) - sciHeight - keypadH - dp(14);
+        }
+
         keypadTop = contentBottom - keypadH;
         sciTop = keypadTop - sciHeight;
         displayTop = headerTop + headerH + dp(4);
         displayBottom = scientific ? sciTop - dp(4) : keypadTop - dp(6);
-        if (displayBottom < displayTop + dp(80)) {
-            displayBottom = displayTop + dp(80);
+        if (displayBottom < displayTop + dp(56)) {
+            displayBottom = displayTop + dp(56);
         }
-        displayRect.set(0, displayTop, W, displayBottom);
-        rDisplay.set(dp(8), displayTop, W - dp(8), displayBottom);
+        displayRect.set(contentLeft, displayTop, contentLeft + contentW, displayBottom);
+        rDisplay.set(contentLeft + dp(8), displayTop, contentLeft + contentW - dp(8), displayBottom);
 
-        float keypadLeft = margin;
+        float keypadLeft = contentLeft + margin;
         float halfW = keypadCellW / 2f;
         float halfH = keypadCell / 2f;
         float r = Math.min(halfW, halfH);
@@ -296,9 +421,15 @@ final class CalculatorView extends View {
             }
         }
 
+        Btn eqBtn = findButton(ID_EQ);
+        if (eqBtn != null) {
+            eqShader = new LinearGradient(eqBtn.rect.left, eqBtn.rect.top, eqBtn.rect.right, eqBtn.rect.bottom,
+                    new int[]{PINK, PINK_DEEP}, null, Shader.TileMode.CLAMP);
+        }
+
         if (scientific) {
             float sciGapX = dp(6);
-            float sw = (W - 2 * margin - 4 * sciGapX) / 5f;
+            float sw = (contentW - 2 * margin - 4 * sciGapX) / 5f;
             float sh = sciBtnH;
             int[][] ids = {
                     {ID_INV, ID_DEG, ID_SIN, ID_COS, ID_TAN},
@@ -308,7 +439,7 @@ final class CalculatorView extends View {
             };
             for (int row = 0; row < 4; row++) {
                 for (int col = 0; col < ids[row].length; col++) {
-                    float x = margin + col * (sw + sciGapX);
+                    float x = keypadLeft + col * (sw + sciGapX);
                     float y = sciTop + dp(4) + row * (sh + sciGap);
                     Btn b = new Btn(ids[row][col], false);
                     b.rect.set(x, y, x + sw, y + sh);
@@ -321,8 +452,8 @@ final class CalculatorView extends View {
         }
 
         float iconY = headerTop + headerH / 2f;
-        float iconSize = dp(44);
-        float right = W - dp(20);
+        float iconSize = Math.min(dp(44), headerH);
+        float right = contentLeft + contentW - dp(20);
         rOverflow.set(right - iconSize / 2f, iconY - iconSize / 2f, right + iconSize / 2f, iconY + iconSize / 2f);
         float fxX = right - dp(46);
         rFx.set(fxX - iconSize / 2f, iconY - iconSize / 2f, fxX + iconSize / 2f, iconY + iconSize / 2f);
@@ -335,26 +466,27 @@ final class CalculatorView extends View {
     }
 
     private void layoutOverlays() {
-        float margin = dp(12);
-        historySheet.set(margin, padTop + dp(8), W - margin, H - padBottom - dp(10));
+        refreshHistoryBounds();
 
-        menuCard.set(W - Math.min(dp(302), W - dp(24)) - margin,
-                headerTop + headerH + dp(4),
-                W - margin,
-                headerTop + headerH + dp(4) + 3 * dp(54) + dp(14));
+        float margin = dp(12);
+        float menuRight = contentLeft + contentW - margin;
+        float menuWidth = Math.min(dp(302), contentW - dp(24));
+        float menuTop = headerTop + headerH + dp(4);
+        menuCard.set(menuRight - menuWidth, menuTop, menuRight, menuTop + 3 * dp(54) + dp(14));
         float itemTop = menuCard.top + dp(7);
         menuClear.set(menuCard.left, itemTop, menuCard.right, itemTop + dp(54));
         menuSci.set(menuCard.left, itemTop + dp(54), menuCard.right, itemTop + dp(108));
         menuAbout.set(menuCard.left, itemTop + dp(108), menuCard.right, itemTop + dp(162));
 
         float cw = Math.min(dp(330), W - dp(40));
-        float ch = dp(214);
+        float availH = Math.max(dp(180), H - padTop - padBottom - dp(24));
+        float ch = Math.min(dp(214), availH);
         confirmCard.set((W - cw) / 2f, (H - ch) / 2f, (W + cw) / 2f, (H + ch) / 2f);
         float by = confirmCard.bottom - dp(66);
         confirmCancel.set(confirmCard.left + dp(20), by, confirmCard.centerX() - dp(6), by + dp(46));
         confirmOk.set(confirmCard.centerX() + dp(6), by, confirmCard.right - dp(20), by + dp(46));
 
-        float ah = dp(352);
+        float ah = Math.min(dp(352), availH);
         aboutCard.set((W - cw) / 2f, (H - ah) / 2f, (W + cw) / 2f, (H + ah) / 2f);
         aboutClose.set(aboutCard.left + dp(24), aboutCard.bottom - dp(66),
                 aboutCard.right - dp(24), aboutCard.bottom - dp(20));
@@ -472,26 +604,30 @@ final class CalculatorView extends View {
     }
 
     private void drawGlow(Canvas canvas) {
-        glowPaint.setShader(new RadialGradient(W * 0.92f, H * 0.30f, W * 0.62f,
-                new int[]{0x2AFF48D8, 0x0DFF48D8, 0x00FF48D8}, null, Shader.TileMode.CLAMP));
-        canvas.drawCircle(W * 0.92f, H * 0.30f, W * 0.62f, glowPaint);
-        glowPaint.setShader(new RadialGradient(W * 0.02f, H * 0.72f, W * 0.55f,
-                new int[]{0x244B2AD8, 0x004B2AD8}, null, Shader.TileMode.CLAMP));
-        canvas.drawCircle(W * 0.02f, H * 0.72f, W * 0.55f, glowPaint);
+        if (glowTopShader != null) {
+            glowPaint.setShader(glowTopShader);
+            canvas.drawCircle(W * 0.92f, H * 0.30f, W * 0.62f, glowPaint);
+        }
+        if (glowBottomShader != null) {
+            glowPaint.setShader(glowBottomShader);
+            canvas.drawCircle(W * 0.02f, H * 0.72f, W * 0.55f, glowPaint);
+        }
         glowPaint.setShader(null);
     }
 
     private void drawHeader(Canvas canvas) {
         float cy = headerTop + headerH / 2f;
-        drawMascot(canvas, dp(28), cy + dp(1.5f), dp(31), 1f);
+        drawMascot(canvas, contentLeft + dp(28), cy + dp(1.5f), dp(31), 1f);
         textPaint.setTypeface(semibold);
-        textPaint.setTextSize(dp(21));
+        textPaint.setTextSize(Math.min(sp(21), headerH * 0.45f));
         textPaint.setTextAlign(Paint.Align.LEFT);
         textPaint.setColor(WHITE);
-        canvas.drawText("Octo", dp(49), cy + dp(7.5f), textPaint);
+        float titleX = contentLeft + dp(49);
+        float titleY = cy + dp(7.5f);
+        canvas.drawText("Octo", titleX, titleY, textPaint);
         float w = textPaint.measureText("Octo");
         textPaint.setColor(PINK);
-        canvas.drawText("Calc", dp(49) + w + dp(1), cy + dp(7.5f), textPaint);
+        canvas.drawText("Calc", titleX + w + dp(1), titleY, textPaint);
 
         drawHistoryIcon(canvas, rHistory.centerX(), cy);
         drawFxIcon(canvas, rFx.centerX(), cy);
@@ -515,41 +651,43 @@ final class CalculatorView extends View {
     }
 
     private void drawHistoryIcon(Canvas canvas, float cx, float cy) {
+        linePaint.setShader(null);
         linePaint.setColor(LAVENDER);
         linePaint.setAlpha(overlay == OVERLAY_HISTORY ? 255 : 215);
         linePaint.setStyle(Paint.Style.STROKE);
         linePaint.setStrokeWidth(dp(1.9f));
         linePaint.setStrokeCap(Paint.Cap.ROUND);
-        RectF arc = new RectF(cx - dp(9), cy - dp(9), cx + dp(9), cy + dp(9));
-        canvas.drawArc(arc, 205, 285, false, linePaint);
-        Path arrow = new Path();
-        arrow.moveTo(cx - dp(9.5f), cy - dp(3.5f));
-        arrow.lineTo(cx - dp(9.5f), cy - dp(9f));
-        arrow.lineTo(cx - dp(3.8f), cy - dp(9f));
-        canvas.drawPath(arrow, linePaint);
+        tmpRect.set(cx - dp(9), cy - dp(9), cx + dp(9), cy + dp(9));
+        canvas.drawArc(tmpRect, 205, 285, false, linePaint);
+        tmpPath.reset();
+        tmpPath.moveTo(cx - dp(9.5f), cy - dp(3.5f));
+        tmpPath.lineTo(cx - dp(9.5f), cy - dp(9f));
+        tmpPath.lineTo(cx - dp(3.8f), cy - dp(9f));
+        canvas.drawPath(tmpPath, linePaint);
         canvas.drawLine(cx, cy - dp(4.5f), cx, cy + dp(0.5f), linePaint);
         canvas.drawLine(cx, cy + dp(0.5f), cx + dp(4f), cy + dp(2.5f), linePaint);
         linePaint.setAlpha(255);
     }
 
     private void drawFxIcon(Canvas canvas, float cx, float cy) {
-        RectF pill = new RectF(cx - dp(14), cy - dp(11.5f), cx + dp(14), cy + dp(11.5f));
+        tmpRect.set(cx - dp(14), cy - dp(11.5f), cx + dp(14), cy + dp(11.5f));
         buttonPaint.setShader(null);
         buttonPaint.setStyle(Paint.Style.FILL);
         buttonPaint.setColor(scientific ? PINK : 0x00000000);
-        canvas.drawRoundRect(pill, dp(11), dp(11), buttonPaint);
+        canvas.drawRoundRect(tmpRect, dp(11), dp(11), buttonPaint);
         if (!scientific) {
             strokePaint.setShader(null);
             strokePaint.setStyle(Paint.Style.STROKE);
             strokePaint.setStrokeWidth(dp(1.3f));
             strokePaint.setColor(0xFF493579);
-            canvas.drawRoundRect(pill, dp(11), dp(11), strokePaint);
+            canvas.drawRoundRect(tmpRect, dp(11), dp(11), strokePaint);
         }
         textPaint.setTypeface(medium);
-        textPaint.setTextSize(dp(13));
+        textPaint.setTextSize(sp(13));
         textPaint.setTextAlign(Paint.Align.CENTER);
         textPaint.setColor(scientific ? INK : LAVENDER);
-        canvas.drawText("fx", cx, cy + dp(4.5f), textPaint);
+        float base = cy - (textPaint.ascent() + textPaint.descent()) / 2f;
+        canvas.drawText("fx", cx, base, textPaint);
     }
 
     private void drawOverflowIcon(Canvas canvas, float cx, float cy) {
@@ -563,49 +701,44 @@ final class CalculatorView extends View {
         buttonPaint.setAlpha(255);
     }
 
+    private String currentMainDisplayText() {
+        if (errorMsg != null) {
+            return errorMsg;
+        }
+        if (tokens.isEmpty() && lastResultRaw != null) {
+            return pretty(lastResultRaw);
+        }
+        String expr = joinExpression();
+        return expr.isEmpty() ? "0" : pretty(expr);
+    }
+
+    private String spokenDisplayText() {
+        String main = currentMainDisplayText();
+        if (errorMsg == null && cachedPreview != null) {
+            return main + ", = " + cachedPreview;
+        }
+        return main;
+    }
+
     private void drawDisplay(Canvas canvas) {
         String small = null;
-        String main;
-        String preview = null;
-
-        String expr = joinExpression();
         if (errorMsg != null) {
-            main = errorMsg;
+            String expr = joinExpression();
             small = expr.isEmpty() ? null : pretty(expr);
         } else if (tokens.isEmpty() && lastResultRaw != null) {
-            main = pretty(lastResultRaw);
             small = lastExpr == null ? null : lastExpr + " =";
-        } else {
-            main = expr.isEmpty() ? "0" : pretty(expr);
         }
 
-        if (tokens.isEmpty() && lastResultRaw == null && errorMsg == null) {
-            main = "0";
-        }
-
-        boolean previewVisible = false;
-        if (errorMsg == null && !tokens.isEmpty() && tokens.size() > 1) {
-            preview = computePreview();
-            if (preview != null && !preview.equals(main)) {
-                previewVisible = true;
-            }
-        }
+        String main = currentMainDisplayText();
+        boolean previewVisible = errorMsg == null && cachedPreview != null;
 
         canvas.save();
         canvas.clipRect(displayRect);
-        float right = W - dp(24);
-        float avail = W - dp(48);
+        float right = contentLeft + contentW - dp(24);
+        float avail = contentW - dp(48);
         displayAvail = avail;
 
-        if (small != null) {
-            textPaint.setTypeface(medium);
-            textPaint.setTextSize(dp(18));
-            textPaint.setTextAlign(Paint.Align.RIGHT);
-            textPaint.setColor(MUTED);
-            canvas.drawText(small, right, displayTop + dp(24), textPaint);
-        }
-
-        float previewSize = dp(22);
+        float previewSize = Math.min(sp(22), Math.max(dp(14), displayRect.height() * 0.22f));
         float previewY = displayBottom - dp(8);
         float mainBase = previewVisible ? previewY - dp(28) : displayBottom - dp(12);
 
@@ -613,6 +746,20 @@ final class CalculatorView extends View {
         if (errorMsg != null) {
             size = dp(30);
         }
+        float maxMainH = Math.max(dp(20), displayRect.height() - (small != null ? dp(28) : dp(8)) - (previewVisible ? dp(28) : dp(10)));
+        if (size > maxMainH) {
+            size = maxMainH;
+        }
+
+        if (small != null) {
+            textPaint.setTypeface(medium);
+            textPaint.setColor(MUTED);
+            float smallMaxW = hasMemory ? Math.max(dp(40), avail - dp(32)) : avail;
+            float smallBase = Math.min(displayTop + dp(24), mainBase - size * 0.9f);
+            smallBase = Math.max(displayTop + dp(16), smallBase);
+            drawRightAlignedText(canvas, small, right, smallBase, smallMaxW, sp(18), sp(11));
+        }
+
         textPaint.setTypeface(semibold);
         textPaint.setTextSize(size);
         float measured = textPaint.measureText(main);
@@ -647,35 +794,54 @@ final class CalculatorView extends View {
 
         if (previewVisible) {
             textPaint.setTypeface(medium);
-            textPaint.setTextSize(previewSize);
-            textPaint.setTextAlign(Paint.Align.RIGHT);
             textPaint.setColor(0xFFB9B2E6);
-            String p = pretty(preview);
-            canvas.drawText(p, right, previewY, textPaint);
+            drawRightAlignedText(canvas, cachedPreview, right, previewY, avail, previewSize, sp(12));
         }
 
         if (hasMemory) {
-            RectF badge = new RectF(dp(24), displayTop + dp(2), dp(24) + dp(24), displayTop + dp(20));
+            float badgeLeft = contentLeft + dp(24);
+            tmpRect.set(badgeLeft, displayTop + dp(2), badgeLeft + dp(24), displayTop + dp(20));
             buttonPaint.setShader(null);
             buttonPaint.setStyle(Paint.Style.FILL);
             buttonPaint.setColor(0xFF2B1A5F);
-            canvas.drawRoundRect(badge, dp(9), dp(9), buttonPaint);
+            canvas.drawRoundRect(tmpRect, dp(9), dp(9), buttonPaint);
             textPaint.setTypeface(semibold);
-            textPaint.setTextSize(dp(10));
+            textPaint.setTextSize(sp(10));
             textPaint.setTextAlign(Paint.Align.CENTER);
             textPaint.setColor(PINK);
-            canvas.drawText("M", badge.centerX(), badge.centerY() + dp(3.5f), textPaint);
+            canvas.drawText("M", tmpRect.centerX(), tmpRect.centerY() + dp(3.5f), textPaint);
         }
         canvas.restore();
     }
 
-    private String computePreview() {
-        try {
-            double v = CalcEngine.evaluate(joinExpression(), degrees);
-            return CalcEngine.format(v);
-        } catch (CalcEngine.Error e) {
-            return null;
+    private void drawRightAlignedText(Canvas canvas, String text, float right, float baseline,
+            float maxWidth, float maxSize, float minSize) {
+        if (text == null || text.isEmpty() || maxWidth <= 0) {
+            return;
         }
+        textPaint.setTextAlign(Paint.Align.RIGHT);
+        float size = maxSize;
+        textPaint.setTextSize(size);
+        while (textPaint.measureText(text) > maxWidth && size > minSize) {
+            size = Math.max(minSize, size - dp(1));
+            textPaint.setTextSize(size);
+        }
+        String shown = text;
+        if (textPaint.measureText(shown) > maxWidth) {
+            int lo = 0;
+            int hi = text.length();
+            while (lo < hi) {
+                int mid = (lo + hi) / 2;
+                String candidate = "\u2026" + text.substring(mid);
+                if (textPaint.measureText(candidate) <= maxWidth) {
+                    hi = mid;
+                } else {
+                    lo = mid + 1;
+                }
+            }
+            shown = lo < text.length() ? ("\u2026" + text.substring(lo)) : "\u2026";
+        }
+        canvas.drawText(shown, right, baseline, textPaint);
     }
 
     private void drawButton(Canvas canvas, Btn b) {
@@ -727,9 +893,8 @@ final class CalculatorView extends View {
         canvas.scale(scale, scale, b.cx, b.cy);
         if (b.circle) {
             float r = b.r;
-            if (b.id == ID_EQ) {
-                buttonPaint.setShader(new LinearGradient(b.rect.left, b.rect.top, b.rect.right, b.rect.bottom,
-                        new int[]{PINK, PINK_DEEP}, null, Shader.TileMode.CLAMP));
+            if (b.id == ID_EQ && eqShader != null) {
+                buttonPaint.setShader(eqShader);
                 buttonPaint.setColor(PINK);
             } else {
                 buttonPaint.setShader(null);
@@ -754,7 +919,7 @@ final class CalculatorView extends View {
 
         String label = labelFor(b);
         if (sci) {
-            float size = label.length() >= 5 ? dp(10.5f) : dp(12.5f);
+            float size = Math.min(label.length() >= 5 ? sp(10.5f) : sp(12.5f), b.rect.height() * 0.44f);
             textPaint.setTypeface(medium);
             textPaint.setTextSize(size);
             textPaint.setTextAlign(Paint.Align.CENTER);
@@ -793,14 +958,14 @@ final class CalculatorView extends View {
         linePaint.setColor(color);
         float w = size * 0.98f;
         float h = size * 0.72f;
-        Path p = new Path();
-        p.moveTo(cx - w / 2f, cy);
-        p.lineTo(cx - w / 2f + h * 0.55f, cy - h / 2f);
-        p.lineTo(cx + w / 2f, cy - h / 2f);
-        p.lineTo(cx + w / 2f, cy + h / 2f);
-        p.lineTo(cx - w / 2f + h * 0.55f, cy + h / 2f);
-        p.close();
-        canvas.drawPath(p, linePaint);
+        tmpPath.reset();
+        tmpPath.moveTo(cx - w / 2f, cy);
+        tmpPath.lineTo(cx - w / 2f + h * 0.55f, cy - h / 2f);
+        tmpPath.lineTo(cx + w / 2f, cy - h / 2f);
+        tmpPath.lineTo(cx + w / 2f, cy + h / 2f);
+        tmpPath.lineTo(cx - w / 2f + h * 0.55f, cy + h / 2f);
+        tmpPath.close();
+        canvas.drawPath(tmpPath, linePaint);
         float xs = h * 0.22f;
         canvas.drawLine(cx - xs, cy - xs, cx + xs, cy + xs, linePaint);
         canvas.drawLine(cx - xs, cy + xs, cx + xs, cy - xs, linePaint);
@@ -812,8 +977,9 @@ final class CalculatorView extends View {
         linePaint.setStrokeWidth(dp(3.2f));
         linePaint.setStrokeCap(Paint.Cap.ROUND);
         linePaint.setColor(INK);
-        canvas.drawLine(cx - size / 2f, cy - dp(6), cx + size / 2f, cy - dp(6), linePaint);
-        canvas.drawLine(cx - size / 2f, cy + dp(6), cx + size / 2f, cy + dp(6), linePaint);
+        float offset = Math.min(dp(6), size * 0.26f);
+        canvas.drawLine(cx - size / 2f, cy - offset, cx + size / 2f, cy - offset, linePaint);
+        canvas.drawLine(cx - size / 2f, cy + offset, cx + size / 2f, cy + offset, linePaint);
     }
 
     private String pretty(String raw) {
@@ -837,12 +1003,87 @@ final class CalculatorView extends View {
         lastResultRaw = null;
         lastResultValue = 0;
         errorMsg = null;
+        recalledFromHistory = false;
     }
 
     private void afterEdit() {
         errorMsg = null;
+        recalledFromHistory = false;
         scrollToEnd = true;
+        updatePreview();
         invalidate();
+        notifyDisplayAccessibilityChanged();
+    }
+
+    private void addFormattedNumberTokens(String formatted, boolean wrapNegativeInParens) {
+        if (formatted == null || formatted.isEmpty()) {
+            return;
+        }
+        boolean neg = formatted.charAt(0) == '-' || formatted.charAt(0) == '\u2212';
+        if (neg) {
+            String mag = formatted.substring(1).replace('-', '\u2212');
+            if (wrapNegativeInParens) {
+                tokens.add("(");
+                tokens.add("\u2212");
+                tokens.add(mag);
+                tokens.add(")");
+            } else {
+                tokens.add("\u2212");
+                tokens.add(mag);
+            }
+        } else {
+            tokens.add(formatted.replace('-', '\u2212'));
+        }
+    }
+
+    private static boolean isPlainNumberExpression(String s) {
+        if (s == null || s.isEmpty()) {
+            return false;
+        }
+        int i = 0;
+        char first = s.charAt(0);
+        if (first == '-' || first == '\u2212') {
+            i++;
+            if (i >= s.length()) {
+                return false;
+            }
+        }
+        boolean hasDigit = false;
+        boolean hasDot = false;
+        for (; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isDigit(c)) {
+                hasDigit = true;
+            } else if ((c == ',' || c == '.') && !hasDot) {
+                hasDot = true;
+            } else {
+                return false;
+            }
+        }
+        return hasDigit;
+    }
+
+    private void updatePreview() {
+        if (errorMsg != null || tokens.isEmpty()) {
+            cachedPreview = null;
+            return;
+        }
+        String cleaned = CalcEngine.trimTrailingOperators(joinExpression());
+        if (cleaned.isEmpty() || isPlainNumberExpression(cleaned)) {
+            cachedPreview = null;
+            return;
+        }
+        try {
+            double v = CalcEngine.evaluate(cleaned, degrees);
+            String formatted = pretty(CalcEngine.format(v));
+            if (formatted.equals(pretty(cleaned))) {
+                cachedPreview = null;
+            } else {
+                cachedPreview = formatted;
+            }
+        } catch (CalcEngine.Error e) {
+            cachedPreview = null;
+        }
     }
 
     private void appendFunction(String name) {
@@ -880,7 +1121,13 @@ final class CalculatorView extends View {
         }
         String last = tokens.get(tokens.size() - 1);
         if (isNumber(last)) {
-            tokens.set(tokens.size() - 1, last + digit);
+            if (last.equals("0")) {
+                if (!digit.equals("0")) {
+                    tokens.set(tokens.size() - 1, digit);
+                }
+            } else {
+                tokens.set(tokens.size() - 1, last + digit);
+            }
         } else {
             if (needsMultiplyBeforeValue()) {
                 tokens.add("\u00d7");
@@ -928,13 +1175,10 @@ final class CalculatorView extends View {
 
     private void appendOperator(String op) {
         if (tokens.isEmpty() && lastResultRaw != null) {
-            tokens.add(lastResultRaw);
+            addFormattedNumberTokens(lastResultRaw, false);
             clearLastState();
         } else if (errorMsg != null) {
             errorMsg = null;
-        }
-        if (!tokens.isEmpty() && isOperatorToken(tokens.get(tokens.size() - 1))) {
-            tokens.remove(tokens.size() - 1);
         }
         if (tokens.isEmpty()) {
             if (op.equals("\u2212")) {
@@ -944,6 +1188,26 @@ final class CalculatorView extends View {
             return;
         }
         String last = tokens.get(tokens.size() - 1);
+        if (op.equals("\u2212") && last.equals("\u2212")) {
+            afterEdit();
+            return;
+        }
+        if (op.equals("\u2212") && (last.equals("\u00d7") || last.equals("\u00f7"))) {
+            tokens.add(op);
+            afterEdit();
+            return;
+        }
+        while (!tokens.isEmpty() && isOperatorToken(tokens.get(tokens.size() - 1))) {
+            tokens.remove(tokens.size() - 1);
+        }
+        if (tokens.isEmpty()) {
+            if (op.equals("\u2212")) {
+                tokens.add(op);
+            }
+            afterEdit();
+            return;
+        }
+        last = tokens.get(tokens.size() - 1);
         if (last.endsWith("(") || last.endsWith("^")) {
             if (op.equals("\u2212")) {
                 tokens.add(op);
@@ -993,34 +1257,21 @@ final class CalculatorView extends View {
         afterEdit();
     }
 
-    private void appendPercent() {
-        if (tokens.isEmpty()) {
-            if (lastResultRaw != null) {
-                tokens.add(lastResultRaw);
-                clearLastState();
-            } else {
-                return;
-            }
-        }
-        String last = tokens.get(tokens.size() - 1);
-        if (isOperatorToken(last) || last.endsWith("(")) {
-            return;
-        }
-        tokens.add("%");
-        afterEdit();
-    }
-
     private void appendPostfix(String token) {
         if (tokens.isEmpty()) {
             if (lastResultRaw != null) {
-                tokens.add(lastResultRaw);
+                addFormattedNumberTokens(lastResultRaw, true);
                 clearLastState();
             } else {
                 return;
             }
         }
+        if (recalledFromHistory && tokens.size() == 2 && tokens.get(0).equals("\u2212")) {
+            tokens.add(0, "(");
+            tokens.add(")");
+        }
         String last = tokens.get(tokens.size() - 1);
-        if (isOperatorToken(last) || last.endsWith("(")) {
+        if (isOperatorToken(last) || last.endsWith("(") || last.endsWith("^")) {
             return;
         }
         tokens.add(token);
@@ -1029,10 +1280,12 @@ final class CalculatorView extends View {
 
     private void backspace() {
         if (tokens.isEmpty()) {
-            if (lastResultRaw != null || lastExpr != null) {
+            if (lastResultRaw != null || lastExpr != null || errorMsg != null) {
                 clearLastState();
+                cachedPreview = null;
                 scrollToEnd = true;
                 invalidate();
+                notifyDisplayAccessibilityChanged();
             }
             return;
         }
@@ -1045,32 +1298,54 @@ final class CalculatorView extends View {
         afterEdit();
     }
 
+    private String errorText(CalcEngine.Error e) {
+        switch (e.kind) {
+            case DIV_ZERO:
+                return str(R.string.err_div_zero);
+            case DOMAIN:
+                return str(R.string.err_domain);
+            case UNDEFINED:
+                return str(R.string.err_undefined);
+            case FORMAT:
+            default:
+                return str(R.string.err_format);
+        }
+    }
+
     private void evaluateAndShow() {
         if (tokens.isEmpty()) {
             if (lastResultRaw != null) {
                 errorMsg = null;
-                        invalidate();
+                invalidate();
             }
             return;
         }
-        String expr = joinExpression();
+        String cleaned = CalcEngine.trimTrailingOperators(joinExpression());
+        if (cleaned.isEmpty()) {
+            return;
+        }
         try {
-            double value = CalcEngine.evaluate(expr, degrees);
+            double value = CalcEngine.evaluate(cleaned, degrees);
             String result = CalcEngine.format(value);
-            history.add(pretty(expr), pretty(result));
-            lastExpr = pretty(expr);
+            String shownExpr = pretty(cleaned);
+            history.add(shownExpr, pretty(result));
+            lastExpr = shownExpr;
             lastResultRaw = result;
             lastResultValue = value;
             lastAnswer = value;
             hasAnswer = true;
-                errorMsg = null;
+            errorMsg = null;
+            recalledFromHistory = false;
             tokens.clear();
+            cachedPreview = null;
             scrollToEnd = true;
             performHapticFeedback(HapticFeedbackConstants.CONFIRM);
         } catch (CalcEngine.Error e) {
-            errorMsg = e.getMessage();
-            }
+            errorMsg = errorText(e);
+            cachedPreview = null;
+        }
         invalidate();
+        notifyDisplayAccessibilityChanged();
     }
 
     private double currentValue() {
@@ -1096,8 +1371,39 @@ final class CalculatorView extends View {
         if (needsMultiplyBeforeValue()) {
             tokens.add("\u00d7");
         }
-        tokens.add(CalcEngine.format(memory).replace('-', '\u2212'));
+        addFormattedNumberTokens(CalcEngine.format(memory), true);
         afterEdit();
+    }
+
+    private void copyDisplayedValue() {
+        if (errorMsg != null) {
+            return;
+        }
+        String value;
+        if (tokens.isEmpty() && lastResultRaw != null) {
+            value = lastResultRaw;
+        } else if (cachedPreview != null) {
+            value = cachedPreview;
+        } else {
+            String expr = joinExpression();
+            value = expr.isEmpty() ? "0" : pretty(expr);
+        }
+        ClipboardManager cm = (ClipboardManager) getContext().getSystemService(Context.CLIPBOARD_SERVICE);
+        if (cm != null) {
+            cm.setPrimaryClip(ClipData.newPlainText(str(R.string.app_name), value));
+            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+            Toast.makeText(getContext(), R.string.toast_copied, Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    private void toggleScientific(boolean closeOverlayFirst) {
+        scientific = !scientific;
+        history.setScientific(scientific);
+        if (closeOverlayFirst) {
+            closeOverlay();
+        }
+        layoutUi();
+        notifyWindowContentChanged();
     }
 
     private void onButton(int id) {
@@ -1112,14 +1418,16 @@ final class CalculatorView extends View {
                 }
                 tokens.clear();
                 clearLastState();
+                cachedPreview = null;
                 scrollToEnd = true;
                 invalidate();
+                notifyDisplayAccessibilityChanged();
                 break;
             case ID_PAREN:
                 appendParen();
                 break;
             case ID_PCT:
-                appendPercent();
+                appendPostfix("%");
                 break;
             case ID_DIV:
                 appendOperator("\u00f7");
@@ -1145,10 +1453,13 @@ final class CalculatorView extends View {
             case ID_INV:
                 inverse = !inverse;
                 invalidate();
+                notifyWindowContentChanged();
                 break;
             case ID_DEG:
                 degrees = !degrees;
+                history.setDegrees(degrees);
                 afterEdit();
+                notifyWindowContentChanged();
                 break;
             case ID_SIN:
                 appendFunction(inverse ? "sin\u207b\u00b9(" : "sin(");
@@ -1206,6 +1517,7 @@ final class CalculatorView extends View {
             case ID_MC:
                 memory = 0;
                 hasMemory = false;
+                history.clearMemory();
                 invalidate();
                 break;
             case ID_MR:
@@ -1213,12 +1525,22 @@ final class CalculatorView extends View {
                 break;
             case ID_MPLUS:
                 memory += currentValue();
+                // Normalise -0.0 en +0.0
+                if (memory == 0.0) {
+                    memory = 0.0;
+                }
                 hasMemory = true;
+                history.setMemory(memory);
                 invalidate();
                 break;
             case ID_MMINUS:
                 memory -= currentValue();
+                // Normalise -0.0 en +0.0
+                if (memory == 0.0) {
+                    memory = 0.0;
+                }
                 hasMemory = true;
+                history.setMemory(memory);
                 invalidate();
                 break;
             case ID_ANS:
@@ -1231,10 +1553,79 @@ final class CalculatorView extends View {
                 if (needsMultiplyBeforeValue()) {
                     tokens.add("\u00d7");
                 }
-                tokens.add(CalcEngine.format(lastAnswer).replace('-', '\u2212'));
+                addFormattedNumberTokens(CalcEngine.format(lastAnswer), true);
                 afterEdit();
                 break;
         }
+    }
+
+    @Override
+    public boolean onKeyDown(int keyCode, KeyEvent event) {
+        if (overlay != OVERLAY_NONE) {
+            if (keyCode == KeyEvent.KEYCODE_ESCAPE) {
+                closeOverlay();
+                return true;
+            }
+            return super.onKeyDown(keyCode, event);
+        }
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_ENTER:
+            case KeyEvent.KEYCODE_NUMPAD_ENTER:
+                onButton(ID_EQ);
+                return true;
+            case KeyEvent.KEYCODE_DEL:
+                onButton(ID_BACK);
+                return true;
+            case KeyEvent.KEYCODE_ESCAPE:
+            case KeyEvent.KEYCODE_FORWARD_DEL:
+                onButton(ID_AC);
+                return true;
+        }
+        int ch = event.getUnicodeChar();
+        if (ch >= '0' && ch <= '9') {
+            onButton(ID_NUM + (ch - '0'));
+            return true;
+        }
+        switch (ch) {
+            case ',':
+            case '.':
+                onButton(ID_DOT);
+                return true;
+            case '+':
+                onButton(ID_ADD);
+                return true;
+            case '-':
+            case '\u2212':
+                onButton(ID_SUB);
+                return true;
+            case '*':
+            case 'x':
+            case 'X':
+            case '\u00d7':
+                onButton(ID_MUL);
+                return true;
+            case '/':
+            case '\u00f7':
+                onButton(ID_DIV);
+                return true;
+            case '%':
+                onButton(ID_PCT);
+                return true;
+            case '(':
+            case ')':
+                onButton(ID_PAREN);
+                return true;
+            case '^':
+                onButton(ID_POW);
+                return true;
+            case '=':
+                onButton(ID_EQ);
+                return true;
+            case '!':
+                onButton(ID_FACT);
+                return true;
+        }
+        return super.onKeyDown(keyCode, event);
     }
 
     @Override
@@ -1243,17 +1634,17 @@ final class CalculatorView extends View {
         float y = event.getY();
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
-                downX = x;
-                downY = y;
                 longFired = false;
                 if (overlay != OVERLAY_NONE) {
-                    handleOverlayDown(x, y);
+                    handleOverlayDown(event);
                     return true;
                 }
                 if (rDisplay.contains(x, y)) {
                     displayDragging = true;
+                    displayMoved = false;
                     displayDragStartX = x;
                     displayDragStartScroll = mainScroll;
+                    handler.postDelayed(longPressRunnable, 480);
                     return true;
                 }
                 if (rHistory.contains(x, y)) {
@@ -1284,7 +1675,7 @@ final class CalculatorView extends View {
                 break;
             case MotionEvent.ACTION_MOVE:
                 if (overlay != OVERLAY_NONE) {
-                    handleOverlayMove(x, y);
+                    handleOverlayMove(event);
                     return true;
                 }
                 if (headerPressed != 0) {
@@ -1296,6 +1687,10 @@ final class CalculatorView extends View {
                     return true;
                 }
                 if (displayDragging) {
+                    if (!displayMoved && Math.abs(x - displayDragStartX) > dp(6)) {
+                        displayMoved = true;
+                        handler.removeCallbacks(longPressRunnable);
+                    }
                     float limit = Math.max(0, mainWidth - displayAvail);
                     mainScroll = Math.max(0, Math.min(limit, displayDragStartScroll + (x - displayDragStartX)));
                     invalidate();
@@ -1315,8 +1710,9 @@ final class CalculatorView extends View {
                 }
                 break;
             case MotionEvent.ACTION_UP:
+                handler.removeCallbacks(longPressRunnable);
                 if (overlay != OVERLAY_NONE) {
-                    handleOverlayUp(x, y);
+                    handleOverlayUp(event);
                     return true;
                 }
                 if (headerPressed != 0) {
@@ -1329,8 +1725,7 @@ final class CalculatorView extends View {
                         if (which == 1) {
                             openOverlay(OVERLAY_HISTORY);
                         } else if (which == 2) {
-                            scientific = !scientific;
-                            layoutUi();
+                            toggleScientific(false);
                         } else {
                             openOverlay(OVERLAY_MENU);
                         }
@@ -1339,9 +1734,9 @@ final class CalculatorView extends View {
                 }
                 if (displayDragging) {
                     displayDragging = false;
+                    displayMoved = false;
                     return true;
                 }
-                handler.removeCallbacks(longPressRunnable);
                 if (pressedId != -1) {
                     Btn pressed = findButton(pressedId);
                     Btn up = hitButton(x, y);
@@ -1353,15 +1748,17 @@ final class CalculatorView extends View {
                 }
                 break;
             case MotionEvent.ACTION_CANCEL:
+                handler.removeCallbacks(longPressRunnable);
                 if (overlay != OVERLAY_NONE) {
                     finishOverlayTouch();
                     return true;
                 }
-                handler.removeCallbacks(longPressRunnable);
                 pressedId = -1;
                 headerPressed = 0;
                 displayDragging = false;
+                displayMoved = false;
                 historyDragging = false;
+                recycleVelocityTracker();
                 invalidate();
                 break;
         }
@@ -1393,20 +1790,33 @@ final class CalculatorView extends View {
     }
 
     private void onLongPress() {
-        if (pressedId == ID_AC) {
+        if (displayDragging && !displayMoved) {
             longFired = true;
+            displayDragging = false;
+            copyDisplayedValue();
+            return;
+        }
+        if (pressedId == ID_AC) {
             pressedId = -1;
-            openOverlay(OVERLAY_CONFIRM);
-            performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+            if (!isAllClear() || !history.items.isEmpty() || hasMemory || hasAnswer) {
+                longFired = true;
+                confirmResetAll = true;
+                openOverlay(OVERLAY_CONFIRM);
+                performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
+            } else {
+                invalidate();
+            }
         } else if (pressedId == ID_BACK) {
             longFired = true;
             pressedId = -1;
-            if (!tokens.isEmpty()) {
+            if (!tokens.isEmpty() || !isAllClear()) {
                 tokens.clear();
                 clearLastState();
+                cachedPreview = null;
                 scrollToEnd = true;
                 performHapticFeedback(HapticFeedbackConstants.LONG_PRESS);
                 invalidate();
+                notifyDisplayAccessibilityChanged();
             }
         }
     }
@@ -1414,6 +1824,12 @@ final class CalculatorView extends View {
     private void openOverlay(int which) {
         overlay = which;
         overlayAnim = 0f;
+        overlayDownTarget = TARGET_NONE;
+        historyDragging = false;
+        recycleVelocityTracker();
+        if (!historyScroller.isFinished()) {
+            historyScroller.abortAnimation();
+        }
         if (overlayAnimator != null) {
             overlayAnimator.cancel();
         }
@@ -1426,27 +1842,41 @@ final class CalculatorView extends View {
         });
         overlayAnimator.start();
         if (which == OVERLAY_HISTORY) {
-            refreshHistoryBounds();
             historyScroll = 0;
-            historyDragging = false;
+            refreshHistoryBounds();
             historyMoved = false;
         }
+        if (overlayChangedListener != null) {
+            overlayChangedListener.onOverlayChanged(true);
+        }
         invalidate();
+        notifyWindowContentChanged();
     }
 
     private void closeOverlay() {
         overlay = OVERLAY_NONE;
         pressedId = -1;
+        overlayDownTarget = TARGET_NONE;
         historyDragging = false;
+        recycleVelocityTracker();
+        if (!historyScroller.isFinished()) {
+            historyScroller.abortAnimation();
+        }
         if (overlayAnimator != null) {
             overlayAnimator.cancel();
             overlayAnimator = null;
         }
+        if (overlayChangedListener != null) {
+            overlayChangedListener.onOverlayChanged(false);
+        }
         invalidate();
+        notifyWindowContentChanged();
     }
 
     private void refreshHistoryBounds() {
-        historySheet.set(dp(10), padTop + dp(8), W - dp(10), H - padBottom - dp(10));
+        float margin = dp(10);
+        historySheet.set(contentLeft + margin, padTop + dp(8),
+                contentLeft + contentW - margin, H - padBottom - dp(10));
         float header = dp(66);
         historyList.set(historySheet.left + dp(8), historySheet.top + header,
                 historySheet.right - dp(8), historySheet.bottom - dp(10));
@@ -1457,34 +1887,96 @@ final class CalculatorView extends View {
         rHistClear.set(rHistClose.left - dp(10) - clearW, historySheet.top + dp(13),
                 rHistClose.left - dp(10), historySheet.top + dp(13) + closeR);
         historyMaxScroll = Math.max(0, history.items.size() * dp(76) - historyList.height());
-    }
-
-    private void handleOverlayDown(float x, float y) {
-        if (overlay == OVERLAY_HISTORY) {
-            if (rHistClose.contains(x, y)) {
-                return;
-            }
-            if (!history.items.isEmpty() && rHistClear.contains(x, y)) {
-                return;
-            }
-            if (historyList.contains(x, y)) {
-                historyDragging = true;
-                historyDownY = y;
-                historyStartScroll = historyScroll;
-                historyMoved = false;
-            }
-        } else if (overlay == OVERLAY_MENU) {
-            // handled on up
-        } else if (overlay == OVERLAY_CONFIRM) {
-            // handled on up
-        } else if (overlay == OVERLAY_ABOUT) {
-            // handled on up
+        if (historyScroll > historyMaxScroll) {
+            historyScroll = historyMaxScroll;
+        }
+        if (historyScroll < 0) {
+            historyScroll = 0;
         }
     }
 
-    private void handleOverlayMove(float x, float y) {
+    private int hitOverlayTarget(float x, float y) {
+        if (overlay == OVERLAY_HISTORY) {
+            if (rHistClose.contains(x, y)) {
+                return TARGET_HIST_CLOSE;
+            }
+            if (!history.items.isEmpty() && rHistClear.contains(x, y)) {
+                return TARGET_HIST_CLEAR;
+            }
+            if (historyList.contains(x, y)) {
+                return TARGET_HIST_LIST;
+            }
+            if (!historySheet.contains(x, y)) {
+                return TARGET_HIST_OUTSIDE;
+            }
+            return TARGET_NONE;
+        }
+        if (overlay == OVERLAY_MENU) {
+            if (menuClear.contains(x, y)) {
+                return TARGET_MENU_CLEAR;
+            }
+            if (menuSci.contains(x, y)) {
+                return TARGET_MENU_SCI;
+            }
+            if (menuAbout.contains(x, y)) {
+                return TARGET_MENU_ABOUT;
+            }
+            if (!menuCard.contains(x, y)) {
+                return TARGET_MENU_OUTSIDE;
+            }
+            return TARGET_NONE;
+        }
+        if (overlay == OVERLAY_CONFIRM) {
+            if (confirmOk.contains(x, y)) {
+                return TARGET_CONFIRM_OK;
+            }
+            if (confirmCancel.contains(x, y)) {
+                return TARGET_CONFIRM_CANCEL;
+            }
+            if (!confirmCard.contains(x, y)) {
+                return TARGET_CONFIRM_OUTSIDE;
+            }
+            return TARGET_NONE;
+        }
+        if (overlay == OVERLAY_ABOUT) {
+            if (aboutClose.contains(x, y)) {
+                return TARGET_ABOUT_CLOSE;
+            }
+            if (!aboutCard.contains(x, y)) {
+                return TARGET_ABOUT_OUTSIDE;
+            }
+            return TARGET_NONE;
+        }
+        return TARGET_NONE;
+    }
+
+    private void handleOverlayDown(MotionEvent event) {
+        float x = event.getX();
+        float y = event.getY();
+        overlayDownTarget = hitOverlayTarget(x, y);
+        if (overlay == OVERLAY_HISTORY && overlayDownTarget == TARGET_HIST_LIST) {
+            if (!historyScroller.isFinished()) {
+                historyScroller.abortAnimation();
+            }
+            historyDragging = true;
+            historyDownY = y;
+            historyStartScroll = historyScroll;
+            historyMoved = false;
+            if (velocityTracker == null) {
+                velocityTracker = VelocityTracker.obtain();
+            } else {
+                velocityTracker.clear();
+            }
+            velocityTracker.addMovement(event);
+        }
+    }
+
+    private void handleOverlayMove(MotionEvent event) {
         if (overlay == OVERLAY_HISTORY && historyDragging) {
-            float delta = historyDownY - y;
+            if (velocityTracker != null) {
+                velocityTracker.addMovement(event);
+            }
+            float delta = historyDownY - event.getY();
             if (Math.abs(delta) > dp(5)) {
                 historyMoved = true;
             }
@@ -1493,80 +1985,132 @@ final class CalculatorView extends View {
         }
     }
 
-    private void handleOverlayUp(float x, float y) {
+    private void handleOverlayUp(MotionEvent event) {
+        float x = event.getX();
+        float y = event.getY();
+        int upTarget = hitOverlayTarget(x, y);
+        int downTarget = overlayDownTarget;
+        overlayDownTarget = TARGET_NONE;
+
         if (overlay == OVERLAY_HISTORY) {
-            if (rHistClose.contains(x, y)) {
-                closeOverlay();
+            if (historyDragging) {
+                if (historyMoved) {
+                    if (velocityTracker != null && historyMaxScroll > 0) {
+                        velocityTracker.addMovement(event);
+                        velocityTracker.computeCurrentVelocity(1000);
+                        float vy = velocityTracker.getYVelocity();
+                        if (Math.abs(vy) > dp(120)) {
+                            historyScroller.fling(0, Math.round(historyScroll), 0, Math.round(-vy),
+                                    0, 0, 0, (int) Math.ceil(historyMaxScroll));
+                            postInvalidateOnAnimation();
+                        }
+                    }
+                } else if (upTarget == TARGET_HIST_LIST && !history.items.isEmpty()) {
+                    int index = (int) ((y - historyList.top + historyScroll) / dp(76));
+                    if (index >= 0 && index < history.items.size()) {
+                        recallHistoryEntry(index);
+                        return;
+                    }
+                }
+                historyDragging = false;
+                recycleVelocityTracker();
                 return;
             }
-            if (!history.items.isEmpty() && rHistClear.contains(x, y)) {
-                openOverlay(OVERLAY_CONFIRM);
-                return;
-            }
-            if (historyDragging && !historyMoved && history.items.size() > 0) {
-                int index = (int) ((y - historyList.top + historyScroll) / dp(76));
-                if (index >= 0 && index < history.items.size()) {
-                    HistoryStore.Entry entry = history.items.get(index);
-                    tokens.clear();
-                    clearLastState();
-                    tokens.add(entry.result.replace('-', '\u2212'));
-                    scrollToEnd = true;
+            if (downTarget == upTarget) {
+                if (upTarget == TARGET_HIST_CLOSE || upTarget == TARGET_HIST_OUTSIDE) {
                     closeOverlay();
-                    afterEdit();
-                    return;
+                } else if (upTarget == TARGET_HIST_CLEAR && !history.items.isEmpty()) {
+                    confirmResetAll = false;
+                    openOverlay(OVERLAY_CONFIRM);
                 }
             }
-            historyDragging = false;
+            return;
+        }
+        if (downTarget != upTarget) {
             return;
         }
         if (overlay == OVERLAY_MENU) {
-            if (menuClear.contains(x, y) && !history.items.isEmpty()) {
+            if (upTarget == TARGET_MENU_CLEAR && !history.items.isEmpty()) {
+                confirmResetAll = false;
                 openOverlay(OVERLAY_CONFIRM);
-                return;
-            }
-            if (menuSci.contains(x, y)) {
-                scientific = !scientific;
-                closeOverlay();
-                layoutUi();
-                return;
-            }
-            if (menuAbout.contains(x, y)) {
+            } else if (upTarget == TARGET_MENU_SCI) {
+                toggleScientific(true);
+            } else if (upTarget == TARGET_MENU_ABOUT) {
                 openOverlay(OVERLAY_ABOUT);
-                return;
+            } else if (upTarget == TARGET_MENU_OUTSIDE) {
+                closeOverlay();
             }
-            closeOverlay();
             return;
         }
         if (overlay == OVERLAY_CONFIRM) {
-            if (confirmOk.contains(x, y)) {
-                history.clear();
-                memory = 0;
-                hasMemory = false;
-                tokens.clear();
-                clearLastState();
-                scrollToEnd = true;
-                closeOverlay();
-                return;
-            }
-            if (confirmCancel.contains(x, y) || !confirmCard.contains(x, y)) {
+            if (upTarget == TARGET_CONFIRM_OK) {
+                performConfirmedClear();
+            } else if (upTarget == TARGET_CONFIRM_CANCEL || upTarget == TARGET_CONFIRM_OUTSIDE) {
                 closeOverlay();
             }
             return;
         }
         if (overlay == OVERLAY_ABOUT) {
-            if (aboutClose.contains(x, y) || !aboutCard.contains(x, y)) {
+            if (upTarget == TARGET_ABOUT_CLOSE || upTarget == TARGET_ABOUT_OUTSIDE) {
                 closeOverlay();
             }
         }
     }
 
+    private void recallHistoryEntry(int index) {
+        HistoryStore.Entry entry = history.items.get(index);
+        tokens.clear();
+        clearLastState();
+        addFormattedNumberTokens(entry.result, false);
+        scrollToEnd = true;
+        historyDragging = false;
+        recycleVelocityTracker();
+        closeOverlay();
+        afterEdit();
+        recalledFromHistory = true;
+    }
+
+    private void performConfirmedClear() {
+        history.clear();
+        refreshHistoryBounds();
+        if (confirmResetAll) {
+            memory = 0;
+            hasMemory = false;
+            history.clearMemory();
+            lastAnswer = 0;
+            hasAnswer = false;
+            tokens.clear();
+            clearLastState();
+            cachedPreview = null;
+            scrollToEnd = true;
+        }
+        closeOverlay();
+        notifyDisplayAccessibilityChanged();
+    }
+
     private void finishOverlayTouch() {
         historyDragging = false;
+        overlayDownTarget = TARGET_NONE;
+        recycleVelocityTracker();
+    }
+
+    private void recycleVelocityTracker() {
+        if (velocityTracker != null) {
+            velocityTracker.recycle();
+            velocityTracker = null;
+        }
+    }
+
+    @Override
+    public void computeScroll() {
+        if (historyScroller.computeScrollOffset()) {
+            historyScroll = Math.max(0, Math.min(historyMaxScroll, historyScroller.getCurrY()));
+            postInvalidateOnAnimation();
+        }
     }
 
     private void drawOverlay(Canvas canvas) {
         dimPaint.setShader(null);
-        dimPaint.setColor(0x00000000);
         dimPaint.setColor(Color.argb((int) (150 * overlayAnim), 4, 0, 14));
         canvas.drawRect(0, 0, W, H, dimPaint);
 
@@ -1582,24 +2126,23 @@ final class CalculatorView extends View {
     }
 
     private void drawHistory(Canvas canvas) {
-        refreshHistoryBounds();
         float offset = (1f - overlayAnim) * dp(46);
         canvas.save();
         canvas.translate(0, offset);
         drawCard(canvas, historySheet, dp(28), 0xFF16073E, 0x88000000);
 
         textPaint.setTypeface(semibold);
-        textPaint.setTextSize(dp(20));
+        textPaint.setTextSize(sp(20));
         textPaint.setTextAlign(Paint.Align.LEFT);
         textPaint.setColor(WHITE);
-        canvas.drawText("Historique", historySheet.left + dp(24), historySheet.top + dp(40), textPaint);
+        canvas.drawText(str(R.string.history_title), historySheet.left + dp(24), historySheet.top + dp(40), textPaint);
 
         if (!history.items.isEmpty()) {
             textPaint.setTypeface(medium);
-            textPaint.setTextSize(dp(13));
+            textPaint.setTextSize(sp(13));
             textPaint.setTextAlign(Paint.Align.RIGHT);
             textPaint.setColor(PINK);
-            canvas.drawText("Effacer", rHistClear.right, historySheet.top + dp(39), textPaint);
+            canvas.drawText(str(R.string.action_clear), rHistClear.right, historySheet.top + dp(39), textPaint);
         }
 
         drawCloseIcon(canvas, rHistClose.centerX(), rHistClose.centerY());
@@ -1610,33 +2153,31 @@ final class CalculatorView extends View {
             float cy = historyList.centerY() - dp(40);
             drawMascot(canvas, historyList.centerX(), cy + dp(6), dp(68), 0.38f);
             textPaint.setTypeface(medium);
-            textPaint.setTextSize(dp(17));
+            textPaint.setTextSize(sp(17));
             textPaint.setTextAlign(Paint.Align.CENTER);
             textPaint.setColor(LAVENDER);
-            canvas.drawText("Aucun historique", historyList.centerX(), cy + dp(60), textPaint);
+            canvas.drawText(str(R.string.history_empty_title), historyList.centerX(), cy + dp(60), textPaint);
             textPaint.setTypeface(regular);
-            textPaint.setTextSize(dp(13.5f));
+            textPaint.setTextSize(sp(13.5f));
             textPaint.setColor(MUTED_DARK);
-            canvas.drawText("Vos calculs apparaîtront ici", historyList.centerX(), cy + dp(82), textPaint);
+            canvas.drawText(str(R.string.history_empty_subtitle), historyList.centerX(), cy + dp(82), textPaint);
         } else {
             int count = history.items.size();
             float rowH = dp(76);
+            float right = historyList.right - dp(16);
+            float maxRowW = Math.max(dp(40), historyList.width() - dp(32));
             for (int i = 0; i < count; i++) {
                 HistoryStore.Entry entry = history.items.get(i);
                 float top = historyList.top + i * rowH - historyScroll;
                 if (top > historyList.bottom || top + rowH < historyList.top) {
                     continue;
                 }
-                float right = historyList.right - dp(16);
                 textPaint.setTypeface(regular);
-                textPaint.setTextSize(dp(15));
-                textPaint.setTextAlign(Paint.Align.RIGHT);
                 textPaint.setColor(MUTED);
-                canvas.drawText(entry.expression, right, top + dp(28), textPaint);
+                drawRightAlignedText(canvas, entry.expression, right, top + dp(28), maxRowW, sp(15), sp(10));
                 textPaint.setTypeface(semibold);
-                textPaint.setTextSize(dp(25));
                 textPaint.setColor(WHITE);
-                canvas.drawText(entry.result, right, top + dp(58), textPaint);
+                drawRightAlignedText(canvas, entry.result, right, top + dp(58), maxRowW, sp(25), sp(13));
                 if (i < count - 1) {
                     linePaint.setShader(null);
                     linePaint.setStyle(Paint.Style.STROKE);
@@ -1645,6 +2186,19 @@ final class CalculatorView extends View {
                     canvas.drawLine(historyList.left + dp(12), top + rowH - dp(1),
                             historyList.right - dp(12), top + rowH - dp(1), linePaint);
                 }
+            }
+            if (historyMaxScroll > 0) {
+                float contentH = count * rowH;
+                float viewH = historyList.height();
+                float thumbH = Math.max(dp(24), viewH * (viewH / contentH));
+                float thumbTravel = Math.max(0, viewH - thumbH);
+                float thumbTop = historyList.top + (historyScroll / historyMaxScroll) * thumbTravel;
+                float trackRight = historyList.right - dp(4);
+                tmpRect.set(trackRight - dp(3), thumbTop, trackRight, thumbTop + thumbH);
+                buttonPaint.setShader(null);
+                buttonPaint.setStyle(Paint.Style.FILL);
+                buttonPaint.setColor(0x44FFFFFF);
+                canvas.drawRoundRect(tmpRect, dp(1.5f), dp(1.5f), buttonPaint);
             }
         }
         canvas.restore();
@@ -1655,9 +2209,9 @@ final class CalculatorView extends View {
         drawCard(canvas, menuCard, dp(22), 0xFF1B0C48, 0x99000000);
         canvas.save();
         canvas.clipRect(menuCard);
-        drawMenuItem(canvas, menuClear, "Effacer l'historique", 0, !history.items.isEmpty());
-        drawMenuItem(canvas, menuSci, "Boutons scientifiques", 1, true);
-        drawMenuItem(canvas, menuAbout, "\u00c0 propos", 2, true);
+        drawMenuItem(canvas, menuClear, str(R.string.menu_clear_history), 0, !history.items.isEmpty());
+        drawMenuItem(canvas, menuSci, str(R.string.menu_scientific), 1, true);
+        drawMenuItem(canvas, menuAbout, str(R.string.menu_about), 2, true);
         linePaint.setShader(null);
         linePaint.setStyle(Paint.Style.STROKE);
         linePaint.setStrokeWidth(1);
@@ -1672,7 +2226,7 @@ final class CalculatorView extends View {
         int color = enabled ? LAVENDER : MUTED_DARK;
         drawMenuIcon(canvas, rect.left + dp(30), cy, icon, color);
         textPaint.setTypeface(medium);
-        textPaint.setTextSize(dp(15));
+        textPaint.setTextSize(sp(15));
         textPaint.setTextAlign(Paint.Align.LEFT);
         textPaint.setColor(color);
         canvas.drawText(label, rect.left + dp(52), cy + dp(5), textPaint);
@@ -1689,23 +2243,23 @@ final class CalculatorView extends View {
         linePaint.setStrokeJoin(Paint.Join.ROUND);
         linePaint.setColor(color);
         if (icon == 0) {
-            RectF can = new RectF(cx - dp(6), cy - dp(5), cx + dp(6), cy + dp(8));
-            canvas.drawRoundRect(can, dp(3), dp(3), linePaint);
+            tmpRect.set(cx - dp(6), cy - dp(5), cx + dp(6), cy + dp(8));
+            canvas.drawRoundRect(tmpRect, dp(3), dp(3), linePaint);
             canvas.drawLine(cx - dp(8), cy - dp(5), cx + dp(8), cy - dp(5), linePaint);
             canvas.drawLine(cx - dp(3), cy - dp(8), cx + dp(3), cy - dp(8), linePaint);
             canvas.drawLine(cx - dp(2), cy - dp(1), cx - dp(2), cy + dp(4), linePaint);
             canvas.drawLine(cx + dp(2), cy - dp(1), cx + dp(2), cy + dp(4), linePaint);
         } else if (icon == 1) {
             textPaint.setTypeface(medium);
-            textPaint.setTextSize(dp(14));
+            textPaint.setTextSize(sp(14));
             textPaint.setTextAlign(Paint.Align.CENTER);
             textPaint.setColor(color);
             canvas.drawText("fx", cx, cy + dp(5), textPaint);
         } else {
-            RectF circle = new RectF(cx - dp(8), cy - dp(8), cx + dp(8), cy + dp(8));
-            canvas.drawOval(circle, linePaint);
+            tmpRect.set(cx - dp(8), cy - dp(8), cx + dp(8), cy + dp(8));
+            canvas.drawOval(tmpRect, linePaint);
             textPaint.setTypeface(medium);
-            textPaint.setTextSize(dp(12));
+            textPaint.setTextSize(sp(12));
             textPaint.setTextAlign(Paint.Align.CENTER);
             textPaint.setColor(color);
             canvas.drawText("i", cx, cy + dp(4.2f), textPaint);
@@ -1718,11 +2272,11 @@ final class CalculatorView extends View {
         linePaint.setStrokeWidth(dp(2.2f));
         linePaint.setStrokeCap(Paint.Cap.ROUND);
         linePaint.setColor(PINK);
-        Path p = new Path();
-        p.moveTo(cx - dp(6), cy);
-        p.lineTo(cx - dp(1), cy + dp(5));
-        p.lineTo(cx + dp(7), cy - dp(5));
-        canvas.drawPath(p, linePaint);
+        tmpPath.reset();
+        tmpPath.moveTo(cx - dp(6), cy);
+        tmpPath.lineTo(cx - dp(1), cy + dp(5));
+        tmpPath.lineTo(cx + dp(7), cy - dp(5));
+        canvas.drawPath(tmpPath, linePaint);
     }
 
     private void drawConfirm(Canvas canvas) {
@@ -1731,21 +2285,24 @@ final class CalculatorView extends View {
         canvas.scale(scale, scale, W / 2f, H / 2f);
         drawCard(canvas, confirmCard, dp(24), 0xFF1B0C48, 0x99000000);
         textPaint.setTypeface(semibold);
-        textPaint.setTextSize(dp(19));
+        textPaint.setTextSize(sp(19));
         textPaint.setTextAlign(Paint.Align.LEFT);
         textPaint.setColor(WHITE);
-        canvas.drawText("Effacer l'historique ?", confirmCard.left + dp(24), confirmCard.top + dp(48), textPaint);
+        canvas.drawText(str(confirmResetAll ? R.string.confirm_reset_title : R.string.confirm_history_title),
+                confirmCard.left + dp(24), confirmCard.top + dp(48), textPaint);
         textPaint.setTypeface(regular);
-        textPaint.setTextSize(dp(14));
+        textPaint.setTextSize(sp(14));
         textPaint.setColor(MUTED);
-        canvas.drawText("L'historique et la m\u00e9moire seront", confirmCard.left + dp(24), confirmCard.top + dp(78), textPaint);
-        canvas.drawText("effac\u00e9s d\u00e9finitivement.", confirmCard.left + dp(24), confirmCard.top + dp(98), textPaint);
+        canvas.drawText(str(confirmResetAll ? R.string.confirm_reset_line1 : R.string.confirm_history_line1),
+                confirmCard.left + dp(24), confirmCard.top + dp(78), textPaint);
+        canvas.drawText(str(confirmResetAll ? R.string.confirm_reset_line2 : R.string.confirm_history_line2),
+                confirmCard.left + dp(24), confirmCard.top + dp(98), textPaint);
 
         textPaint.setTypeface(medium);
-        textPaint.setTextSize(dp(14.5f));
+        textPaint.setTextSize(sp(14.5f));
         textPaint.setTextAlign(Paint.Align.CENTER);
         textPaint.setColor(LAVENDER);
-        canvas.drawText("Annuler", confirmCancel.centerX(), confirmCancel.centerY() + dp(5), textPaint);
+        canvas.drawText(str(R.string.action_cancel), confirmCancel.centerX(), confirmCancel.centerY() + dp(5), textPaint);
 
         buttonPaint.setShader(null);
         buttonPaint.setStyle(Paint.Style.FILL);
@@ -1753,7 +2310,8 @@ final class CalculatorView extends View {
         canvas.drawRoundRect(confirmOk, dp(23), dp(23), buttonPaint);
         textPaint.setTypeface(semibold);
         textPaint.setColor(INK);
-        canvas.drawText("Effacer", confirmOk.centerX(), confirmOk.centerY() + dp(5), textPaint);
+        canvas.drawText(str(confirmResetAll ? R.string.action_reset : R.string.action_clear),
+                confirmOk.centerX(), confirmOk.centerY() + dp(5), textPaint);
         canvas.restore();
     }
 
@@ -1763,34 +2321,35 @@ final class CalculatorView extends View {
         canvas.scale(scale, scale, W / 2f, H / 2f);
         drawCard(canvas, aboutCard, dp(26), 0xFF1B0C48, 0x99000000);
         float cx = aboutCard.centerX();
-        drawMascot(canvas, cx, aboutCard.top + dp(71), dp(75), 1f);
+        float hRatio = Math.min(1f, aboutCard.height() / dp(352));
+        drawMascot(canvas, cx, aboutCard.top + dp(71) * hRatio, dp(75) * hRatio, 1f);
         textPaint.setTypeface(semibold);
-        textPaint.setTextSize(dp(24));
+        textPaint.setTextSize(sp(24));
         textPaint.setTextAlign(Paint.Align.CENTER);
         textPaint.setColor(WHITE);
-        canvas.drawText("Octo Calc", cx, aboutCard.top + dp(130), textPaint);
+        canvas.drawText(str(R.string.app_name), cx, aboutCard.top + dp(130) * hRatio, textPaint);
         textPaint.setTypeface(regular);
-        textPaint.setTextSize(dp(12.5f));
+        textPaint.setTextSize(sp(12.5f));
         textPaint.setColor(MUTED);
-        canvas.drawText("Version 1.0", cx, aboutCard.top + dp(152), textPaint);
+        canvas.drawText(str(R.string.about_version), cx, aboutCard.top + dp(152) * hRatio, textPaint);
 
-        textPaint.setTextSize(dp(14));
+        textPaint.setTextSize(sp(14));
         textPaint.setColor(LAVENDER);
-        canvas.drawText("Une calculatrice au design inspir\u00e9", cx, aboutCard.top + dp(194), textPaint);
-        canvas.drawText("de la charte Octopus Energy.", cx, aboutCard.top + dp(214), textPaint);
-        textPaint.setTextSize(dp(12.5f));
+        canvas.drawText(str(R.string.about_desc_line1), cx, aboutCard.top + dp(194) * hRatio, textPaint);
+        canvas.drawText(str(R.string.about_desc_line2), cx, aboutCard.top + dp(214) * hRatio, textPaint);
+        textPaint.setTextSize(sp(12.5f));
         textPaint.setColor(MUTED);
-        canvas.drawText("Scientifique  \u00b7  Historique  \u00b7  M\u00e9moire", cx, aboutCard.top + dp(250), textPaint);
+        canvas.drawText(str(R.string.about_features), cx, aboutCard.top + dp(250) * hRatio, textPaint);
 
         buttonPaint.setShader(null);
         buttonPaint.setStyle(Paint.Style.FILL);
         buttonPaint.setColor(PINK);
         canvas.drawRoundRect(aboutClose, dp(23), dp(23), buttonPaint);
         textPaint.setTypeface(semibold);
-        textPaint.setTextSize(dp(14.5f));
+        textPaint.setTextSize(sp(14.5f));
         textPaint.setTextAlign(Paint.Align.CENTER);
         textPaint.setColor(INK);
-        canvas.drawText("Fermer", aboutClose.centerX(), aboutClose.centerY() + dp(5), textPaint);
+        canvas.drawText(str(R.string.action_close), aboutClose.centerX(), aboutClose.centerY() + dp(5), textPaint);
         canvas.restore();
     }
 
@@ -1798,9 +2357,9 @@ final class CalculatorView extends View {
         cardPaint.setShader(null);
         cardPaint.setStyle(Paint.Style.FILL);
         cardPaint.setColor(shadow);
-        RectF shadowRect = new RectF(rect);
-        shadowRect.offset(0, dp(8));
-        canvas.drawRoundRect(shadowRect, radius, radius, cardPaint);
+        tmpShadowRect.set(rect);
+        tmpShadowRect.offset(0, dp(8));
+        canvas.drawRoundRect(tmpShadowRect, radius, radius, cardPaint);
         cardPaint.setColor(fill);
         canvas.drawRoundRect(rect, radius, radius, cardPaint);
         strokePaint.setShader(null);
@@ -1827,6 +2386,7 @@ final class CalculatorView extends View {
         }
         if (displayDragging) {
             displayDragging = false;
+            displayMoved = false;
             return true;
         }
         return false;
@@ -1837,6 +2397,7 @@ final class CalculatorView extends View {
         out.putString("lastExpr", lastExpr);
         out.putString("lastResultRaw", lastResultRaw);
         out.putDouble("lastResultValue", lastResultValue);
+        out.putString("errorMsg", errorMsg);
         out.putBoolean("degrees", degrees);
         out.putBoolean("inverse", inverse);
         out.putBoolean("scientific", scientific);
@@ -1855,6 +2416,7 @@ final class CalculatorView extends View {
         lastExpr = in.getString("lastExpr");
         lastResultRaw = in.getString("lastResultRaw");
         lastResultValue = in.getDouble("lastResultValue");
+        errorMsg = in.getString("errorMsg");
         degrees = in.getBoolean("degrees");
         inverse = in.getBoolean("inverse");
         scientific = in.getBoolean("scientific");
@@ -1862,7 +2424,9 @@ final class CalculatorView extends View {
         hasMemory = in.getBoolean("hasMemory");
         lastAnswer = in.getDouble("lastAnswer");
         hasAnswer = in.getBoolean("hasAnswer");
+        recalledFromHistory = false;
         scrollToEnd = true;
+        updatePreview();
         layoutUi();
         invalidate();
     }
@@ -1871,8 +2435,532 @@ final class CalculatorView extends View {
     protected void onDetachedFromWindow() {
         super.onDetachedFromWindow();
         handler.removeCallbacks(longPressRunnable);
+        recycleVelocityTracker();
         if (overlayAnimator != null) {
             overlayAnimator.cancel();
+        }
+    }
+
+    private String contentDescriptionForButton(Btn b) {
+        if (b.id >= ID_NUM && b.id < ID_NUM + 10) {
+            return String.valueOf(b.id - ID_NUM);
+        }
+        switch (b.id) {
+            case ID_AC:
+                return str(isAllClear() ? R.string.cd_all_clear : R.string.cd_clear);
+            case ID_PAREN:
+                return str(R.string.cd_paren);
+            case ID_PCT:
+                return str(R.string.cd_percent);
+            case ID_DIV:
+                return str(R.string.cd_div);
+            case ID_MUL:
+                return str(R.string.cd_mul);
+            case ID_SUB:
+                return str(R.string.cd_sub);
+            case ID_ADD:
+                return str(R.string.cd_add);
+            case ID_DOT:
+                return str(R.string.cd_dot);
+            case ID_BACK:
+                return str(R.string.cd_back);
+            case ID_EQ:
+                return str(R.string.cd_eq);
+            case ID_INV:
+                return str(R.string.cd_inv);
+            case ID_DEG:
+                return str(degrees ? R.string.cd_deg : R.string.cd_rad);
+            case ID_SIN:
+                return str(inverse ? R.string.cd_asin : R.string.cd_sin);
+            case ID_COS:
+                return str(inverse ? R.string.cd_acos : R.string.cd_cos);
+            case ID_TAN:
+                return str(inverse ? R.string.cd_atan : R.string.cd_tan);
+            case ID_LN:
+                return str(R.string.cd_ln);
+            case ID_LOG:
+                return str(R.string.cd_log);
+            case ID_EXP:
+                return str(R.string.cd_exp);
+            case ID_TENX:
+                return str(R.string.cd_tenx);
+            case ID_POW:
+                return str(R.string.cd_pow);
+            case ID_SQRT:
+                return str(R.string.cd_sqrt);
+            case ID_SQR:
+                return str(R.string.cd_sqr);
+            case ID_FACT:
+                return str(R.string.cd_fact);
+            case ID_PI:
+                return str(R.string.cd_pi);
+            case ID_E:
+                return str(R.string.cd_e);
+            case ID_MC:
+                return str(R.string.cd_mc);
+            case ID_MR:
+                return str(R.string.cd_mr);
+            case ID_MPLUS:
+                return str(R.string.cd_mplus);
+            case ID_MMINUS:
+                return str(R.string.cd_mminus);
+            case ID_ANS:
+                return str(R.string.cd_ans);
+        }
+        return "";
+    }
+
+    @SuppressWarnings("deprecation")
+    private static AccessibilityNodeInfo obtainNodeInfo() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return new AccessibilityNodeInfo();
+        }
+        return AccessibilityNodeInfo.obtain();
+    }
+
+    @SuppressWarnings("deprecation")
+    private static AccessibilityNodeInfo obtainNodeInfo(View source) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return new AccessibilityNodeInfo(source);
+        }
+        return AccessibilityNodeInfo.obtain(source);
+    }
+
+    @SuppressWarnings("deprecation")
+    private static AccessibilityEvent obtainAccessibilityEvent(int eventType) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            return new AccessibilityEvent(eventType);
+        }
+        return AccessibilityEvent.obtain(eventType);
+    }
+
+    @SuppressWarnings("deprecation")
+    private static void setBoundsInParentCompat(AccessibilityNodeInfo node, Rect bounds) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            node.setBoundsInParent(bounds);
+        }
+    }
+
+    private void notifyWindowContentChanged() {
+        if (accessibilityManager == null || !accessibilityManager.isEnabled()) {
+            return;
+        }
+        AccessibilityEvent ev = obtainAccessibilityEvent(AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
+        ev.setPackageName(getContext().getPackageName());
+        ev.setClassName(CalculatorView.class.getName());
+        ev.setSource(this);
+        ViewParent parent = getParent();
+        if (parent != null) {
+            parent.requestSendAccessibilityEvent(this, ev);
+        }
+    }
+
+    private void notifyDisplayAccessibilityChanged() {
+        if (accessibilityManager == null || !accessibilityManager.isEnabled() || overlay != OVERLAY_NONE) {
+            return;
+        }
+        sendAccessibilityEventForVirtualView(V_DISPLAY, AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED);
+    }
+
+    private void sendAccessibilityEventForVirtualView(int virtualViewId, int eventType) {
+        if (accessibilityManager == null || !accessibilityManager.isEnabled()) {
+            return;
+        }
+        AccessibilityEvent event = obtainAccessibilityEvent(eventType);
+        event.setPackageName(getContext().getPackageName());
+        event.setClassName(CalculatorView.class.getName());
+        event.setSource(this, virtualViewId);
+        CharSequence text = descriptionForVirtualView(virtualViewId);
+        if (text != null) {
+            event.getText().add(text);
+        }
+        ViewParent parent = getParent();
+        if (parent != null) {
+            parent.requestSendAccessibilityEvent(this, event);
+        }
+    }
+
+    private CharSequence descriptionForVirtualView(int virtualViewId) {
+        switch (virtualViewId) {
+            case V_DISPLAY:
+                return getContext().getString(R.string.cd_display, spokenDisplayText());
+            case V_HIST_ICON:
+                return str(R.string.cd_history);
+            case V_FX_ICON:
+                return str(R.string.cd_scientific);
+            case V_MENU_ICON:
+                return str(R.string.cd_menu);
+            case V_HIST_CLEAR:
+                return str(R.string.action_clear);
+            case V_HIST_CLOSE:
+            case V_ABOUT_CLOSE:
+                return str(R.string.cd_close);
+            case V_MENU_CLEAR:
+                return str(R.string.menu_clear_history);
+            case V_MENU_SCI:
+                return str(R.string.menu_scientific);
+            case V_MENU_ABOUT:
+                return str(R.string.menu_about);
+            case V_CONFIRM_CANCEL:
+                return str(R.string.action_cancel);
+            case V_CONFIRM_OK:
+                return str(confirmResetAll ? R.string.action_reset : R.string.action_clear);
+        }
+        if (virtualViewId >= V_BTN_BASE && virtualViewId < V_HIST_CLEAR) {
+            Btn b = findButton(virtualViewId - V_BTN_BASE);
+            return b != null ? contentDescriptionForButton(b) : null;
+        }
+        if (virtualViewId >= V_HIST_ITEM_BASE) {
+            int idx = virtualViewId - V_HIST_ITEM_BASE;
+            if (idx >= 0 && idx < history.items.size()) {
+                HistoryStore.Entry entry = history.items.get(idx);
+                return entry.expression + " = " + entry.result;
+            }
+        }
+        return null;
+    }
+
+    private int hitVirtualView(float x, float y) {
+        if (overlay == OVERLAY_NONE) {
+            if (rDisplay.contains(x, y)) {
+                return V_DISPLAY;
+            }
+            if (rHistory.contains(x, y)) {
+                return V_HIST_ICON;
+            }
+            if (rFx.contains(x, y)) {
+                return V_FX_ICON;
+            }
+            if (rOverflow.contains(x, y)) {
+                return V_MENU_ICON;
+            }
+            Btn b = hitButton(x, y);
+            return b != null ? V_BTN_BASE + b.id : View.NO_ID;
+        }
+        if (overlay == OVERLAY_HISTORY) {
+            if (rHistClose.contains(x, y)) {
+                return V_HIST_CLOSE;
+            }
+            if (!history.items.isEmpty() && rHistClear.contains(x, y)) {
+                return V_HIST_CLEAR;
+            }
+            if (historyList.contains(x, y) && !history.items.isEmpty()) {
+                int idx = (int) ((y - historyList.top + historyScroll) / dp(76));
+                if (idx >= 0 && idx < history.items.size()) {
+                    return V_HIST_ITEM_BASE + idx;
+                }
+            }
+            return View.NO_ID;
+        }
+        if (overlay == OVERLAY_MENU) {
+            if (menuClear.contains(x, y)) {
+                return V_MENU_CLEAR;
+            }
+            if (menuSci.contains(x, y)) {
+                return V_MENU_SCI;
+            }
+            if (menuAbout.contains(x, y)) {
+                return V_MENU_ABOUT;
+            }
+            return View.NO_ID;
+        }
+        if (overlay == OVERLAY_CONFIRM) {
+            if (confirmCancel.contains(x, y)) {
+                return V_CONFIRM_CANCEL;
+            }
+            if (confirmOk.contains(x, y)) {
+                return V_CONFIRM_OK;
+            }
+            return View.NO_ID;
+        }
+        if (overlay == OVERLAY_ABOUT) {
+            if (aboutClose.contains(x, y)) {
+                return V_ABOUT_CLOSE;
+            }
+        }
+        return View.NO_ID;
+    }
+
+    private void updateHoveredVirtualId(int virtualId) {
+        if (hoveredVirtualId == virtualId) {
+            return;
+        }
+        int prev = hoveredVirtualId;
+        hoveredVirtualId = virtualId;
+        if (prev != View.NO_ID) {
+            sendAccessibilityEventForVirtualView(prev, AccessibilityEvent.TYPE_VIEW_HOVER_EXIT);
+        }
+        if (virtualId != View.NO_ID) {
+            sendAccessibilityEventForVirtualView(virtualId, AccessibilityEvent.TYPE_VIEW_HOVER_ENTER);
+        }
+    }
+
+    @Override
+    protected boolean dispatchHoverEvent(MotionEvent event) {
+        if (accessibilityManager != null && accessibilityManager.isTouchExplorationEnabled()) {
+            int virtualId = hitVirtualView(event.getX(), event.getY());
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_HOVER_ENTER:
+                case MotionEvent.ACTION_HOVER_MOVE:
+                    updateHoveredVirtualId(virtualId);
+                    return true;
+                case MotionEvent.ACTION_HOVER_EXIT:
+                    updateHoveredVirtualId(View.NO_ID);
+                    return true;
+            }
+        }
+        return super.dispatchHoverEvent(event);
+    }
+
+    @Override
+    public AccessibilityNodeProvider getAccessibilityNodeProvider() {
+        if (a11yProvider == null) {
+            a11yProvider = new CalcAccessibilityProvider();
+        }
+        return a11yProvider;
+    }
+
+    private final class CalcAccessibilityProvider extends AccessibilityNodeProvider {
+
+        @Override
+        public AccessibilityNodeInfo createAccessibilityNodeInfo(int virtualViewId) {
+            if (virtualViewId == HOST_VIEW_ID) {
+                AccessibilityNodeInfo root = obtainNodeInfo(CalculatorView.this);
+                onInitializeAccessibilityNodeInfo(root);
+                if (overlay == OVERLAY_NONE) {
+                    root.addChild(CalculatorView.this, V_DISPLAY);
+                    root.addChild(CalculatorView.this, V_HIST_ICON);
+                    root.addChild(CalculatorView.this, V_FX_ICON);
+                    root.addChild(CalculatorView.this, V_MENU_ICON);
+                    for (Btn b : buttons) {
+                        root.addChild(CalculatorView.this, V_BTN_BASE + b.id);
+                    }
+                } else if (overlay == OVERLAY_HISTORY) {
+                    if (!history.items.isEmpty()) {
+                        root.addChild(CalculatorView.this, V_HIST_CLEAR);
+                    }
+                    root.addChild(CalculatorView.this, V_HIST_CLOSE);
+                    float rowH = dp(76);
+                    for (int i = 0; i < history.items.size(); i++) {
+                        float top = historyList.top + i * rowH - historyScroll;
+                        if (top + rowH > historyList.top && top < historyList.bottom) {
+                            root.addChild(CalculatorView.this, V_HIST_ITEM_BASE + i);
+                        }
+                    }
+                } else if (overlay == OVERLAY_MENU) {
+                    root.addChild(CalculatorView.this, V_MENU_CLEAR);
+                    root.addChild(CalculatorView.this, V_MENU_SCI);
+                    root.addChild(CalculatorView.this, V_MENU_ABOUT);
+                } else if (overlay == OVERLAY_CONFIRM) {
+                    root.addChild(CalculatorView.this, V_CONFIRM_CANCEL);
+                    root.addChild(CalculatorView.this, V_CONFIRM_OK);
+                } else if (overlay == OVERLAY_ABOUT) {
+                    root.addChild(CalculatorView.this, V_ABOUT_CLOSE);
+                }
+                return root;
+            }
+
+            Rect bounds = boundsForVirtualView(virtualViewId);
+            CharSequence desc = descriptionForVirtualView(virtualViewId);
+            if (bounds == null || desc == null) {
+                return null;
+            }
+
+            AccessibilityNodeInfo node = obtainNodeInfo();
+            node.setPackageName(getContext().getPackageName());
+            node.setSource(CalculatorView.this, virtualViewId);
+            node.setParent(CalculatorView.this);
+            node.setContentDescription(desc);
+            node.setVisibleToUser(true);
+            setBoundsInParentCompat(node, bounds);
+            getLocationOnScreen(screenLoc);
+            Rect screenBounds = new Rect(bounds);
+            screenBounds.offset(screenLoc[0], screenLoc[1]);
+            node.setBoundsInScreen(screenBounds);
+
+            if (virtualViewId == V_DISPLAY) {
+                node.setClassName("android.widget.TextView");
+                node.setEnabled(true);
+                node.setLongClickable(errorMsg == null);
+                if (errorMsg == null) {
+                    node.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_LONG_CLICK);
+                }
+            } else {
+                node.setClassName("android.widget.Button");
+                boolean enabled = virtualViewId != V_MENU_CLEAR || !history.items.isEmpty();
+                node.setEnabled(enabled);
+                node.setClickable(enabled);
+                if (enabled) {
+                    node.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLICK);
+                }
+            }
+
+            if (focusedVirtualId == virtualViewId) {
+                node.setAccessibilityFocused(true);
+                node.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_CLEAR_ACCESSIBILITY_FOCUS);
+            } else {
+                node.setAccessibilityFocused(false);
+                node.addAction(AccessibilityNodeInfo.AccessibilityAction.ACTION_ACCESSIBILITY_FOCUS);
+            }
+            return node;
+        }
+
+        private Rect boundsForVirtualView(int virtualViewId) {
+            RectF f = null;
+            if (overlay == OVERLAY_NONE) {
+                if (virtualViewId == V_DISPLAY) {
+                    f = rDisplay;
+                } else if (virtualViewId == V_HIST_ICON) {
+                    f = rHistory;
+                } else if (virtualViewId == V_FX_ICON) {
+                    f = rFx;
+                } else if (virtualViewId == V_MENU_ICON) {
+                    f = rOverflow;
+                } else if (virtualViewId >= V_BTN_BASE && virtualViewId < V_HIST_CLEAR) {
+                    Btn b = findButton(virtualViewId - V_BTN_BASE);
+                    if (b != null) {
+                        f = b.rect;
+                    }
+                }
+            } else if (overlay == OVERLAY_HISTORY) {
+                if (virtualViewId == V_HIST_CLEAR && !history.items.isEmpty()) {
+                    f = rHistClear;
+                } else if (virtualViewId == V_HIST_CLOSE) {
+                    f = rHistClose;
+                } else if (virtualViewId >= V_HIST_ITEM_BASE) {
+                    int idx = virtualViewId - V_HIST_ITEM_BASE;
+                    if (idx >= 0 && idx < history.items.size()) {
+                        float rowH = dp(76);
+                        float top = Math.max(historyList.top, historyList.top + idx * rowH - historyScroll);
+                        float bottom = Math.min(historyList.bottom, historyList.top + (idx + 1) * rowH - historyScroll);
+                        if (bottom > top) {
+                            return new Rect(Math.round(historyList.left), Math.round(top),
+                                    Math.round(historyList.right), Math.round(bottom));
+                        }
+                    }
+                }
+            } else if (overlay == OVERLAY_MENU) {
+                if (virtualViewId == V_MENU_CLEAR) {
+                    f = menuClear;
+                } else if (virtualViewId == V_MENU_SCI) {
+                    f = menuSci;
+                } else if (virtualViewId == V_MENU_ABOUT) {
+                    f = menuAbout;
+                }
+            } else if (overlay == OVERLAY_CONFIRM) {
+                if (virtualViewId == V_CONFIRM_CANCEL) {
+                    f = confirmCancel;
+                } else if (virtualViewId == V_CONFIRM_OK) {
+                    f = confirmOk;
+                }
+            } else if (overlay == OVERLAY_ABOUT) {
+                if (virtualViewId == V_ABOUT_CLOSE) {
+                    f = aboutClose;
+                }
+            }
+            if (f == null) {
+                return null;
+            }
+            return new Rect(Math.round(f.left), Math.round(f.top), Math.round(f.right), Math.round(f.bottom));
+        }
+
+        @Override
+        public boolean performAction(int virtualViewId, int action, Bundle arguments) {
+            if (virtualViewId == HOST_VIEW_ID) {
+                return performAccessibilityAction(action, arguments);
+            }
+            if (action == AccessibilityNodeInfo.ACTION_ACCESSIBILITY_FOCUS) {
+                if (focusedVirtualId != virtualViewId) {
+                    focusedVirtualId = virtualViewId;
+                    invalidate();
+                    sendAccessibilityEventForVirtualView(virtualViewId,
+                            AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUSED);
+                    return true;
+                }
+                return false;
+            }
+            if (action == AccessibilityNodeInfo.ACTION_CLEAR_ACCESSIBILITY_FOCUS) {
+                if (focusedVirtualId == virtualViewId) {
+                    focusedVirtualId = View.NO_ID;
+                    invalidate();
+                    sendAccessibilityEventForVirtualView(virtualViewId,
+                            AccessibilityEvent.TYPE_VIEW_ACCESSIBILITY_FOCUS_CLEARED);
+                    return true;
+                }
+                return false;
+            }
+            if (action == AccessibilityNodeInfo.ACTION_LONG_CLICK && virtualViewId == V_DISPLAY) {
+                copyDisplayedValue();
+                return true;
+            }
+            if (action != AccessibilityNodeInfo.ACTION_CLICK) {
+                return false;
+            }
+            if (overlay == OVERLAY_NONE) {
+                if (virtualViewId == V_HIST_ICON) {
+                    openOverlay(OVERLAY_HISTORY);
+                } else if (virtualViewId == V_FX_ICON) {
+                    toggleScientific(false);
+                } else if (virtualViewId == V_MENU_ICON) {
+                    openOverlay(OVERLAY_MENU);
+                } else if (virtualViewId >= V_BTN_BASE && virtualViewId < V_HIST_CLEAR) {
+                    onButton(virtualViewId - V_BTN_BASE);
+                } else {
+                    return false;
+                }
+                sendAccessibilityEventForVirtualView(virtualViewId, AccessibilityEvent.TYPE_VIEW_CLICKED);
+                return true;
+            }
+            if (overlay == OVERLAY_HISTORY) {
+                if (virtualViewId == V_HIST_CLOSE) {
+                    closeOverlay();
+                } else if (virtualViewId == V_HIST_CLEAR && !history.items.isEmpty()) {
+                    confirmResetAll = false;
+                    openOverlay(OVERLAY_CONFIRM);
+                } else if (virtualViewId >= V_HIST_ITEM_BASE) {
+                    int idx = virtualViewId - V_HIST_ITEM_BASE;
+                    if (idx >= 0 && idx < history.items.size()) {
+                        recallHistoryEntry(idx);
+                    } else {
+                        return false;
+                    }
+                } else {
+                    return false;
+                }
+                sendAccessibilityEventForVirtualView(virtualViewId, AccessibilityEvent.TYPE_VIEW_CLICKED);
+                return true;
+            }
+            if (overlay == OVERLAY_MENU) {
+                if (virtualViewId == V_MENU_CLEAR && !history.items.isEmpty()) {
+                    confirmResetAll = false;
+                    openOverlay(OVERLAY_CONFIRM);
+                } else if (virtualViewId == V_MENU_SCI) {
+                    toggleScientific(true);
+                } else if (virtualViewId == V_MENU_ABOUT) {
+                    openOverlay(OVERLAY_ABOUT);
+                } else {
+                    return false;
+                }
+                sendAccessibilityEventForVirtualView(virtualViewId, AccessibilityEvent.TYPE_VIEW_CLICKED);
+                return true;
+            }
+            if (overlay == OVERLAY_CONFIRM) {
+                if (virtualViewId == V_CONFIRM_CANCEL) {
+                    closeOverlay();
+                } else if (virtualViewId == V_CONFIRM_OK) {
+                    performConfirmedClear();
+                } else {
+                    return false;
+                }
+                sendAccessibilityEventForVirtualView(virtualViewId, AccessibilityEvent.TYPE_VIEW_CLICKED);
+                return true;
+            }
+            if (overlay == OVERLAY_ABOUT && virtualViewId == V_ABOUT_CLOSE) {
+                closeOverlay();
+                sendAccessibilityEventForVirtualView(virtualViewId, AccessibilityEvent.TYPE_VIEW_CLICKED);
+                return true;
+            }
+            return false;
         }
     }
 }

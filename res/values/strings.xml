@@ -1,4 +1,78 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Octo Calc</string>
+
+    <string name="err_format">Erreur de format</string>
+    <string name="err_div_zero">Div par 0 impossible</string>
+    <string name="err_domain">Erreur de domaine</string>
+    <string name="err_undefined">Non défini</string>
+
+    <string name="history_title">Historique</string>
+    <string name="action_clear">Effacer</string>
+    <string name="action_cancel">Annuler</string>
+    <string name="action_close">Fermer</string>
+    <string name="action_reset">Réinitialiser</string>
+
+    <string name="history_empty_title">Aucun historique</string>
+    <string name="history_empty_subtitle">Vos calculs apparaîtront ici</string>
+
+    <string name="menu_clear_history">Effacer l\'historique</string>
+    <string name="menu_scientific">Boutons scientifiques</string>
+    <string name="menu_about">À propos</string>
+
+    <string name="confirm_history_title">Effacer l\'historique ?</string>
+    <string name="confirm_history_line1">Tous les calculs enregistrés</string>
+    <string name="confirm_history_line2">seront effacés définitivement.</string>
+
+    <string name="confirm_reset_title">Tout réinitialiser ?</string>
+    <string name="confirm_reset_line1">L\'affichage, la mémoire, Ans</string>
+    <string name="confirm_reset_line2">et l\'historique seront effacés.</string>
+
+    <string name="about_version">Version 1.0</string>
+    <string name="about_desc_line1">Une calculatrice au design inspiré</string>
+    <string name="about_desc_line2">de la charte Octopus Energy.</string>
+    <string name="about_features">Scientifique  ·  Historique  ·  Mémoire</string>
+
+    <string name="toast_copied">Copié</string>
+
+    <string name="cd_display">Affichage : %1$s</string>
+    <string name="cd_history">Historique</string>
+    <string name="cd_scientific">Mode scientifique</string>
+    <string name="cd_menu">Menu</string>
+    <string name="cd_close">Fermer</string>
+    <string name="cd_all_clear">Tout effacer</string>
+    <string name="cd_clear">Effacer</string>
+    <string name="cd_paren">Parenthèse</string>
+    <string name="cd_percent">Pourcent</string>
+    <string name="cd_div">Diviser</string>
+    <string name="cd_mul">Multiplier</string>
+    <string name="cd_sub">Moins</string>
+    <string name="cd_add">Plus</string>
+    <string name="cd_dot">Virgule</string>
+    <string name="cd_back">Retour arrière</string>
+    <string name="cd_eq">Égal</string>
+    <string name="cd_inv">Inverser les fonctions trigonométriques</string>
+    <string name="cd_deg">Unité d\'angle degrés</string>
+    <string name="cd_rad">Unité d\'angle radians</string>
+    <string name="cd_sin">Sinus</string>
+    <string name="cd_asin">Arc sinus</string>
+    <string name="cd_cos">Cosinus</string>
+    <string name="cd_acos">Arc cosinus</string>
+    <string name="cd_tan">Tangente</string>
+    <string name="cd_atan">Arc tangente</string>
+    <string name="cd_ln">Logarithme népérien</string>
+    <string name="cd_log">Logarithme décimal</string>
+    <string name="cd_exp">Exponentielle</string>
+    <string name="cd_tenx">Dix puissance x</string>
+    <string name="cd_pow">Puissance</string>
+    <string name="cd_sqrt">Racine carrée</string>
+    <string name="cd_sqr">Au carré</string>
+    <string name="cd_fact">Factorielle</string>
+    <string name="cd_pi">Pi</string>
+    <string name="cd_e">Constante e</string>
+    <string name="cd_mc">Effacer la mémoire</string>
+    <string name="cd_mr">Rappeler la mémoire</string>
+    <string name="cd_mplus">Ajouter à la mémoire</string>
+    <string name="cd_mminus">Soustraire de la mémoire</string>
+    <string name="cd_ans">Dernier résultat</string>
 </resources>

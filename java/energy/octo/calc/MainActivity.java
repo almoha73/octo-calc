@@ -3,15 +3,45 @@ package energy.octo.calc;
 import android.app.Activity;
 import android.graphics.Color;
 import android.os.Build;
-import android.window.OnBackInvokedDispatcher;
 import android.os.Bundle;
 import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
+import android.window.OnBackInvokedCallback;
+import android.window.OnBackInvokedDispatcher;
 
 public class MainActivity extends Activity {
 
     private CalculatorView calculator;
+    private Api33Back api33Back;
+
+    private static final class Api33Back {
+        private OnBackInvokedCallback callback;
+        private boolean registered;
+
+        void setEnabled(Activity activity, boolean enabled, Runnable onBack) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+                return;
+            }
+            if (enabled == registered) {
+                return;
+            }
+            OnBackInvokedDispatcher dispatcher = activity.getOnBackInvokedDispatcher();
+            if (enabled) {
+                if (callback == null && onBack != null) {
+                    callback = onBack::run;
+                }
+                if (callback != null) {
+                    dispatcher.registerOnBackInvokedCallback(
+                            OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback);
+                    registered = true;
+                }
+            } else if (callback != null) {
+                dispatcher.unregisterOnBackInvokedCallback(callback);
+                registered = false;
+            }
+        }
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -42,13 +72,9 @@ public class MainActivity extends Activity {
         }
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
-                    OnBackInvokedDispatcher.PRIORITY_DEFAULT,
-                    () -> {
-                        if (!calculator.handleBack()) {
-                            finish();
-                        }
-                    });
+            api33Back = new Api33Back();
+            calculator.setOnOverlayChangedListener(
+                    hasOverlay -> api33Back.setEnabled(this, hasOverlay, () -> calculator.handleBack()));
         }
     }
 
@@ -59,6 +85,15 @@ public class MainActivity extends Activity {
     }
 
     @Override
+    protected void onDestroy() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU && api33Back != null) {
+            api33Back.setEnabled(this, false, null);
+        }
+        super.onDestroy();
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")
     public void onBackPressed() {
         if (!calculator.handleBack()) {
             super.onBackPressed();

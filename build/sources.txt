@@ -1,5 +1,0 @@
-/home/almoha/Applications/octo-calc/java/energy/octo/calc/HistoryStore.java
-/home/almoha/Applications/octo-calc/java/energy/octo/calc/MainActivity.java
-/home/almoha/Applications/octo-calc/java/energy/octo/calc/CalcEngine.java
-/home/almoha/Applications/octo-calc/java/energy/octo/calc/CalculatorView.java
-/home/almoha/Applications/octo-calc/build/gen/energy/octo/calc/R.java

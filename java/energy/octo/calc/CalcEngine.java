@@ -11,9 +11,19 @@ import java.math.RoundingMode;
  */
 final class CalcEngine {
 
+    enum ErrorKind {
+        FORMAT,
+        DIV_ZERO,
+        DOMAIN,
+        UNDEFINED
+    }
+
     static final class Error extends Exception {
-        Error(String message) {
+        final ErrorKind kind;
+
+        Error(ErrorKind kind, String message) {
             super(message);
+            this.kind = kind;
         }
     }
 
@@ -28,21 +38,40 @@ final class CalcEngine {
         this.degrees = degrees;
     }
 
-    static double evaluate(String expression, boolean degrees) throws Error {
-        if (expression == null || expression.trim().isEmpty()) {
-            throw new Error("Erreur de format");
+    static String trimTrailingOperators(String expression) {
+        if (expression == null) {
+            return "";
         }
-        CalcEngine parser = new CalcEngine(expression, degrees);
+        int end = expression.length();
+        while (end > 0) {
+            char c = expression.charAt(end - 1);
+            if (Character.isWhitespace(c) || c == '+' || c == '-' || c == '\u2212'
+                    || c == '\u00d7' || c == '*' || c == '\u00f7' || c == '/' || c == '^') {
+                end--;
+            } else {
+                break;
+            }
+        }
+        return expression.substring(0, end).trim();
+    }
+
+    static double evaluate(String expression, boolean degrees) throws Error {
+        String cleaned = trimTrailingOperators(expression);
+        if (cleaned.isEmpty()) {
+            throw new Error(ErrorKind.FORMAT, "Erreur de format");
+        }
+        CalcEngine parser = new CalcEngine(cleaned, degrees);
         double value = parser.parseExpr().value;
         parser.skipSpaces();
         if (parser.pos < parser.src.length()) {
-            throw new Error("Erreur de format");
+            throw new Error(ErrorKind.FORMAT, "Erreur de format");
         }
         if (!Double.isFinite(value)) {
-            throw new Error("Non d\u00e9fini");
+            throw new Error(ErrorKind.UNDEFINED, "Non d\u00e9fini");
         }
-        if (Math.abs(value) < 1e-13) {
-            value = 0;
+        // Normalise -0.0 en +0.0 (en IEEE 754, -0.0 == 0.0 est vrai).
+        if (value == 0.0) {
+            value = 0.0;
         }
         return value;
     }
@@ -81,7 +110,12 @@ final class CalcEngine {
             } else {
                 delta = right.value;
             }
-            left = new Val(minus ? left.value - delta : left.value + delta);
+            double res = minus ? left.value - delta : left.value + delta;
+            double scale = Math.max(Math.abs(left.value), Math.abs(delta));
+            if (Double.isFinite(scale) && scale > 0 && Math.abs(res) < 1e-12 * scale) {
+                res = 0.0;
+            }
+            left = new Val(res);
         }
         return left;
     }
@@ -97,7 +131,7 @@ final class CalcEngine {
                 Val right = parseUnary();
                 if (c == '\u00f7' || c == '/') {
                     if (right.value == 0) {
-                        throw new Error("Div par 0 impossible");
+                        throw new Error(ErrorKind.DIV_ZERO, "Div par 0 impossible");
                     }
                     left = new Val(left.value / right.value);
                 } else {
@@ -145,10 +179,10 @@ final class CalcEngine {
             pos++;
             Val exp = parseUnary();
             if (base.value < 0 && exp.value != Math.rint(exp.value)) {
-                throw new Error("Erreur de domaine");
+                throw new Error(ErrorKind.DOMAIN, "Erreur de domaine");
             }
             if (base.value == 0 && exp.value < 0) {
-                throw new Error("Div par 0 impossible");
+                throw new Error(ErrorKind.DIV_ZERO, "Div par 0 impossible");
             }
             return new Val(Math.pow(base.value, exp.value));
         }
@@ -180,7 +214,7 @@ final class CalcEngine {
     private Val parsePrimary() throws Error {
         skipSpaces();
         if (pos >= src.length()) {
-            throw new Error("Erreur de format");
+            throw new Error(ErrorKind.FORMAT, "Erreur de format");
         }
         char c = src.charAt(pos);
 
@@ -201,7 +235,7 @@ final class CalcEngine {
             pos++;
             double inner = parsePrimary().value;
             if (inner < 0) {
-                throw new Error("Erreur de domaine");
+                throw new Error(ErrorKind.DOMAIN, "Erreur de domaine");
             }
             return new Val(Math.sqrt(inner));
         }
@@ -218,7 +252,7 @@ final class CalcEngine {
         if (startsFunction()) {
             return parseFunction();
         }
-        throw new Error("Erreur de format");
+        throw new Error(ErrorKind.FORMAT, "Erreur de format");
     }
 
     private Val parseFunction() throws Error {
@@ -229,7 +263,7 @@ final class CalcEngine {
             return new Val(toAngle(Math.acos(readArgument(true))));
         }
         if (match("tan\u207b\u00b9(")) {
-            return new Val(toAngle(Math.atan(readArgument(true))));
+            return new Val(toAngle(Math.atan(readArgument(false))));
         }
         if (match("asin(")) {
             return new Val(toAngle(Math.asin(readArgument(true))));
@@ -238,38 +272,38 @@ final class CalcEngine {
             return new Val(toAngle(Math.acos(readArgument(true))));
         }
         if (match("atan(")) {
-            return new Val(toAngle(Math.atan(readArgument(true))));
+            return new Val(toAngle(Math.atan(readArgument(false))));
         }
         if (match("sin(")) {
-            return new Val(Math.sin(toRadians(readArgument(false))));
+            return new Val(evalSin(readArgument(false)));
         }
         if (match("cos(")) {
-            return new Val(Math.cos(toRadians(readArgument(false))));
+            return new Val(evalCos(readArgument(false)));
         }
         if (match("tan(")) {
-            return new Val(Math.tan(toRadians(readArgument(false))));
+            return new Val(evalTan(readArgument(false)));
         }
         if (match("ln(")) {
             double x = readArgument(false);
             if (x <= 0) {
-                throw new Error("Erreur de domaine");
+                throw new Error(ErrorKind.DOMAIN, "Erreur de domaine");
             }
             return new Val(Math.log(x));
         }
         if (match("log(")) {
             double x = readArgument(false);
             if (x <= 0) {
-                throw new Error("Erreur de domaine");
+                throw new Error(ErrorKind.DOMAIN, "Erreur de domaine");
             }
             return new Val(Math.log10(x));
         }
-        throw new Error("Erreur de format");
+        throw new Error(ErrorKind.FORMAT, "Erreur de format");
     }
 
     private double readArgument(boolean inverseTrig) throws Error {
         double value = parseExpr().value;
         if (inverseTrig && (value < -1 || value > 1)) {
-            throw new Error("Erreur de domaine");
+            throw new Error(ErrorKind.DOMAIN, "Erreur de domaine");
         }
         consumeClose();
         return value;
@@ -305,7 +339,7 @@ final class CalcEngine {
         if (pos >= src.length()) {
             return;
         }
-        throw new Error("Erreur de format");
+        throw new Error(ErrorKind.FORMAT, "Erreur de format");
     }
 
     private double parseNumber() throws Error {
@@ -323,7 +357,7 @@ final class CalcEngine {
             }
         }
         if (pos == start) {
-            throw new Error("Erreur de format");
+            throw new Error(ErrorKind.FORMAT, "Erreur de format");
         }
         if (pos < src.length() && (src.charAt(pos) == 'E' || src.charAt(pos) == 'e')) {
             int save = pos;
@@ -345,7 +379,7 @@ final class CalcEngine {
         try {
             return Double.parseDouble(raw);
         } catch (NumberFormatException e) {
-            throw new Error("Erreur de format");
+            throw new Error(ErrorKind.FORMAT, "Erreur de format");
         }
     }
 
@@ -369,8 +403,72 @@ final class CalcEngine {
         }
     }
 
-    private double toRadians(double value) {
-        return degrees ? Math.toRadians(value) : value;
+    private static double degreeMod180(double arg) {
+        return ((arg % 180.0) + 180.0) % 180.0;
+    }
+
+    private static boolean isDegreePiMultiple(double arg, double mod) {
+        return Math.abs(arg) >= 1.0 && (mod < 1e-12 || Math.abs(mod - 180.0) < 1e-12);
+    }
+
+    private static Long nearHalfPiMultiple(double arg) {
+        double halfPi = Math.PI / 2.0;
+        double k = Math.rint(arg / halfPi);
+        if (k != 0.0 && Math.abs(k) < 1e15
+                && Math.abs(arg - k * halfPi) <= Math.max(1e-14, Math.abs(arg) * 1e-14)) {
+            return (long) k;
+        }
+        return null;
+    }
+
+    private double evalSin(double arg) {
+        if (degrees) {
+            double mod = degreeMod180(arg);
+            if (isDegreePiMultiple(arg, mod)) {
+                return 0.0;
+            }
+            return Math.sin(Math.toRadians(arg));
+        }
+        Long k = nearHalfPiMultiple(arg);
+        if (k != null && (k % 2 == 0)) {
+            return 0.0;
+        }
+        return Math.sin(arg);
+    }
+
+    private double evalCos(double arg) {
+        if (degrees) {
+            if (Math.abs(degreeMod180(arg) - 90.0) < 1e-12) {
+                return 0.0;
+            }
+            return Math.cos(Math.toRadians(arg));
+        }
+        Long k = nearHalfPiMultiple(arg);
+        if (k != null && (k % 2 != 0)) {
+            return 0.0;
+        }
+        return Math.cos(arg);
+    }
+
+    private double evalTan(double arg) throws Error {
+        if (degrees) {
+            double mod = degreeMod180(arg);
+            if (Math.abs(mod - 90.0) < 1e-12) {
+                throw new Error(ErrorKind.UNDEFINED, "Non d\u00e9fini");
+            }
+            if (isDegreePiMultiple(arg, mod)) {
+                return 0.0;
+            }
+            return Math.tan(Math.toRadians(arg));
+        }
+        Long k = nearHalfPiMultiple(arg);
+        if (k != null) {
+            if (k % 2 != 0) {
+                throw new Error(ErrorKind.UNDEFINED, "Non d\u00e9fini");
+            }
+            return 0.0;
+        }
+        return Math.tan(arg);
     }
 
     private double toAngle(double radians) {
@@ -379,7 +477,7 @@ final class CalcEngine {
 
     private double factorial(double value) throws Error {
         if (value < 0 || value != Math.rint(value) || value > 170) {
-            throw new Error("Erreur de domaine");
+            throw new Error(ErrorKind.DOMAIN, "Erreur de domaine");
         }
         double result = 1;
         for (int i = 2; i <= (int) value; i++) {
@@ -407,7 +505,7 @@ final class CalcEngine {
             exponent = exponent.replace("E+", "E");
             return (mantissa + exponent).replace('.', ',');
         }
-        BigDecimal bd = new BigDecimal(value).round(MC).stripTrailingZeros();
+        BigDecimal bd = BigDecimal.valueOf(value).round(MC).stripTrailingZeros();
         String s = bd.toPlainString();
         return s.replace('.', ',');
     }

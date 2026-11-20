@@ -23,6 +23,10 @@ final class HistoryStore {
 
     private static final String PREFS = "octo_calc";
     private static final String KEY_HISTORY = "history";
+    private static final String KEY_DEGREES = "degrees";
+    private static final String KEY_SCIENTIFIC = "scientific";
+    private static final String KEY_HAS_MEMORY = "has_memory";
+    private static final String KEY_MEMORY_BITS = "memory_bits";
     private static final int MAX_ITEMS = 100;
 
     private final SharedPreferences prefs;
@@ -70,5 +74,43 @@ final class HistoryStore {
             prefs.edit().putString(KEY_HISTORY, array.toString()).apply();
         } catch (Exception ignored) {
         }
+    }
+
+    boolean isDegrees() {
+        return prefs.getBoolean(KEY_DEGREES, true);
+    }
+
+    void setDegrees(boolean degrees) {
+        prefs.edit().putBoolean(KEY_DEGREES, degrees).apply();
+    }
+
+    boolean isScientific() {
+        return prefs.getBoolean(KEY_SCIENTIFIC, false);
+    }
+
+    void setScientific(boolean scientific) {
+        prefs.edit().putBoolean(KEY_SCIENTIFIC, scientific).apply();
+    }
+
+    boolean hasMemory() {
+        return prefs.getBoolean(KEY_HAS_MEMORY, false);
+    }
+
+    double getMemory() {
+        return Double.longBitsToDouble(prefs.getLong(KEY_MEMORY_BITS, 0L));
+    }
+
+    void setMemory(double value) {
+        prefs.edit()
+                .putBoolean(KEY_HAS_MEMORY, true)
+                .putLong(KEY_MEMORY_BITS, Double.doubleToRawLongBits(value))
+                .apply();
+    }
+
+    void clearMemory() {
+        prefs.edit()
+                .putBoolean(KEY_HAS_MEMORY, false)
+                .putLong(KEY_MEMORY_BITS, 0L)
+                .apply();
     }
 }
